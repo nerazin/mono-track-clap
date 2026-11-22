@@ -27,7 +27,48 @@ The bundle `Mono Track.clap` holds:
 | Mono Track FM+ PAR | FM+ PAR |
 | Mono Track FM+ DYN | FM+ DYN |
 
-Each is monophonic, as a Monomachine track is.
+Each is monophonic, as a Monomachine track is, until POLY is on. Each has an
+editor window with 16 trigs and parameter locks.
+
+## The editor
+
+The top row is the unit's data pages: SYN, AMP, FILT, EFX and LFO1-3. The right
+column holds the track's settings, and the bottom row the 16 trigs.
+
+On a knob, the needle is the stored value. An amber arc goes to a lock sounding
+now, and a violet arc shows what the host's modulation adds.
+
+**Trigs** run on the host's transport, one per sixteenth note, and follow its
+position. Notes come only from MIDI: a trig plays no note. It restarts the filter
+envelope and the LFOs, and ends locks.
+
+| Do this | To get this |
+|---|---|
+| Click a trig | Toggle it |
+| Press and hold it | See its locks without changing it |
+| Right-click or ctrl-click it | Latch the hold, so the mouse is free. Several can be held. Do it again to release. Closing the window releases all of them. |
+| Turn a knob while holding | Lock that value to the held steps. The stored value does not change. A drag or scroll belongs to the trigs held when it began: if they change, the rest of it does nothing, including a trackpad's momentum. |
+| Click a knob while holding | Lock it at its value, or remove its lock |
+| **CPY** / **PST** under a selected trig | Copy the step's trig and all its locks, or replace this step with the copy. A trig is selected by a right-click latch or a held key. PST is gray until something is copied, and CPY is gray on an empty step. The copy lasts while the plug-in is loaded and is not saved with the project. |
+| **CLR LOCKS** | Remove all locks from the held steps |
+| **NOTE ENDS** (on by default) | A MIDI note ends the locks of earlier steps. Off, only a trig or Stop ends them, as on the unit. |
+| **KEYBOARD** on (off by default) | `12345678` and `QWERTYUI` act as the 16 trigs: tap to toggle, hold to edit. They follow the key's position, so any keyboard layout works. Other keys stay with the host. |
+
+**The LED bar above each trig** is red for a trig and green for a trigless step
+(locks but no trig), the unit's colours. Its seven cells are the seven data
+pages, and a page with a lock on that step turns amber. A step with locks pulses,
+in place of the unit's rapid flash. A white line marks the playing step.
+
+**A blue line below a trig** appears when a MIDI note lands on that step during
+playback, and fades.
+
+**While a trig is held**, its locked knobs get an inverted amber label, like the
+unit's inverted LCD field, and show the locked value. All other knobs dim. The
+section titles and LFO tabs count the locks they hold.
+
+**MIDI TRIGS** (SYN, FILT, LFO, all on by default) choose what a MIDI note trigs:
+the machine and AMP envelope, the filter envelope, and the LFOs. With SYN off, a
+note only sets the pitch.
 
 ## Signal flow
 
@@ -62,7 +103,7 @@ the track's own settings. All knobs can be automated and modulated.
 | **FILT** | BASE WDTH HPQ LPQ ATK DEC BOFS WOFS |
 | **EFX** | EQF EQG SRR DTIM DSND DFB DBAS DWID |
 | **LFO1, LFO2, LFO3** | PAGE DEST TRIG WAVE MULT SPD INTL DPTH |
-| **TRACK** | LEVEL, LP KEY, HP KEY, BEND, MASTER TUNE |
+| **TRACK** | LEVEL, LP KEY, HP KEY, BEND, MASTER TUNE, POLY |
 
 SYN by machine:
 
@@ -97,11 +138,25 @@ The TRACK page:
 - **BEND** is the range of MIDI pitch bend, 1/12 to 16OC, sent as KIT ASSIGN
   JOY R/L would be with PAGE PTCH.
 - **MASTER TUNE** is 400.0–499.9 Hz.
+- **POLY** turns the plug-in into six whole tracks playing one sound.
 
 ## How it behaves
 
 - **Notes.** One voice. The last note held wins, and releasing it returns to
   the previous note still held, with a new trig.
+- **POLY.** As on the unit, each of the six voices is a whole track, with its
+  own envelopes, LFO phases, delay line and SRR. Notes go through a port of the
+  firmware's allocator: a free voice that last played the pitch, otherwise the
+  one free the longest, and a seventh note steals the oldest. The voices are not
+  scaled down, so a chord can reach the 24-bit limiter. Turning POLY on or off
+  releases all notes.
+- **Locks.** A lock is applied when the playhead reaches its step, trig or no
+  trig, and lands at once with no knob smoothing. It holds until the next MIDI
+  note or trig that does not lock that parameter. A note on a locked step keeps
+  that step's locks. With NOTE ENDS off, only a trig ends a lock. In POLY a lock
+  reaches all six voices. Stop returns every parameter to its stored value.
+- **A trig in POLY** restarts the filter envelope and LFOs of one voice only, as
+  the firmware does for a pitchless trig.
 - **Timing.** The main CPU's timing is kept: notes and modulation are taken
   every 48 samples, and knobs glide to their new value in steps every 384
   samples, as they do on the unit.
@@ -118,9 +173,13 @@ The TRACK page:
   OUT BUS, AB=MIX and 6×MONO. SID and WAVE, which read a neighbour's pitch, are
   not among these machines. The output is the track's own, after its 24-bit
   limiter.
-- **Not included.** The sequencer, parameter locks, MULTI TRIG transpose, and
-  KIT ASSIGN other than pitch bend (velocity, key position, the joystick's
-  vertical axis).
+- **The sequencer plays no notes.** Trigs and locks act on notes from MIDI. On
+  the unit a trig also plays its own note, and MIDI notes do not end locks (turn
+  NOTE ENDS off for that). Not included: step pitch, note-off trigs, separate AMP/FILT/LFO trig tracks per step, pattern length,
+  swing, slide, the arpeggiator, MULTI TRIG transpose, and KIT ASSIGN other than
+  pitch bend (velocity, key position, the joystick's vertical axis).
+- **Removing a trig keeps its locks** (the step turns green), where the unit
+  clears them. Use CLR LOCKS. A hold on an empty step does not add a trig.
 - **SRR just after it is turned down.** The firmware's SRR then reads memory
   belonging to other stages and, on the unit, partly to other tracks. The
   plug-in reads those words as 0. In a stress test with SRR jumping at random,
@@ -136,15 +195,24 @@ The TRACK page:
 | What | Checked against | Amount | Result |
 |---|---|---|---|
 | Whole DSP track, all 8 machines, from random block words | the firmware in a DSP56300 emulator | 102.4 M samples | 0 differ¹ |
-| The built plug-in, with random knobs, LFOs, notes, bends, tempo | the same | 61.4 M samples | 0 differ¹ |
-| LFOs, knob slew, block words | the main OS's own code in a 68020 emulator | 300,000 frames | 0 differ |
+| The built plug-in, with random knobs, LFOs, notes, bends, tempo | the same | 30.7 M samples | 0 differ¹ |
+| LFOs, knob slew, block words | the main OS's own code in a 68020 emulator | 200,000 frames | 0 differ |
+| POLY's voice allocator | the same | 200,000 note events | 0 differ |
+| Which locks a step sends, and returns to the kit | the same | 100,000 steps | 0 differ |
+| Locks applied to the words and LFOs | the same | 54,050 locks over 100,000 frames | 0 differ |
 | Regression hashes (`tests/test_core.c`) | hashes from the firmware | every machine | pass |
 
 ¹ With the SRR scratch words above set to 0 in the firmware too.
 
 **Not verified:**
 
-- It has not been opened in Bitwig or compared with a real Monomachine.
+- It has not been compared with a real Monomachine. It was tried by hand in
+  Bitwig on macOS, including the editor's trigs, locks, keyboard and trackpad,
+  and in no other host.
+- POLY as a whole was not run against the firmware. Its parts were: the
+  allocator, the locks, and each voice as a track. The order in which the six
+  voices enter the limiter is not traced, and only matters when a chord clips.
+- The sequencer's step timing is the host's transport, not the unit's clock.
 - The main CPU's and DSP's relative timing (which of a frame's three blocks a
   new word reaches first) follows the emulator's host model. It can shift
   modulation by up to about 1 ms.
@@ -165,8 +233,14 @@ cc -std=c99 -O2 -Wno-unused-function tests/test_core.c -lm -o tests/test_core &&
 xcrun clang -std=c11 -O2 -Wno-unused-function -Wno-missing-field-initializers -I vendor/clap/include tests/clap_test.c -o tests/clap_test && tests/clap_test "build/Mono Track.clap"
 ```
 
+```bash
+xcrun clang -std=c11 -O1 -fobjc-arc -w -I vendor/clap/include tests/gui_test.m -framework Cocoa -o tests/gui_test && tests/gui_test "build/Mono Track.clap"
+```
+
 `test_core` needs no firmware. `clap_test` loads the bundle and checks its
-pages, parameters, state and each section's effect on the sound. Both also pass
+pages, parameters, state (including states saved by 0.1.0 and 0.2.0), each
+section's effect on the sound, POLY, the MIDI TRIG switches, trigs and locks. `gui_test` opens the
+editor off-screen and drives it with mouse and key events. All three also pass
 under AddressSanitizer and UBSan and as an Intel build under Rosetta, and the
 bundle passes `clap-trap` at 44.1, 48 and 96 kHz.
 

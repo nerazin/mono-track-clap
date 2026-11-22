@@ -4,9 +4,12 @@ cd "$(dirname "$0")"
 bundle="build/Mono Track.clap"
 mkdir -p "$bundle/Contents/MacOS"
 cp Info.plist "$bundle/Contents/Info.plist"
-xcrun clang -std=c11 -O2 -Wall -Wextra -Wpedantic -Wno-unused-function -fvisibility=hidden \
-  -mmacosx-version-min=11.0 -arch arm64 -arch x86_64 -bundle \
-  -I vendor/clap/include source/mono_track_clap.c -Wl,-exported_symbol,_clap_entry \
+flags="-O2 -Wall -Wextra -Wno-unused-function -fvisibility=hidden -mmacosx-version-min=11.0 -arch arm64 -arch x86_64 -I vendor/clap/include"
+mkdir -p build/obj
+xcrun clang -std=c11 -Wpedantic $flags -c source/mono_track_clap.c -o build/obj/clap.o
+xcrun clang -std=c11 -fobjc-arc $flags -c source/mono_track_gui.m -o build/obj/gui.o
+xcrun clang -mmacosx-version-min=11.0 -arch arm64 -arch x86_64 -bundle build/obj/clap.o build/obj/gui.o \
+  -framework Cocoa -framework QuartzCore -Wl,-exported_symbol,_clap_entry \
   -o "$bundle/Contents/MacOS/Mono Track"
 codesign --force --sign - --timestamp=none "$bundle"
 printf 'Built: %s\n' "$bundle"

@@ -13,6 +13,7 @@
 enum { L_PAGE, L_DEST, L_TRIG, L_WAVE, L_MULT, L_SPD, L_INTL, L_DPTH };
 enum { MT_FREE, MT_TRIG, MT_HOLD, MT_ONE, MT_HALF };
 enum { MT_KNOBS = 32 };   /* SYN, AMP, FILT, EFX */
+enum { MT_VOICES = 6, MT_STEPS = 16, MT_LOCKS = 56 };   /* lockable: SYN AMP FILT EFX LFO1-3, eight each */
 
 typedef struct {
    int32_t pos, out, hold, inc, rem, gate, count;
@@ -154,15 +155,20 @@ static void mt_lfo_apply(MtHost *h, int trig) {
    }
 }
 
-/* mod: per-parameter additions from the host (word units; SYN..EFX then the
- * LFO pages), or NULL. */
-static void mt_host_rebuild(MtHost *h, const int32_t *mod) {
-   memcpy(h->block, h->word, sizeof h->block);
+/* The LFO parameters as the LFOs read them, before LFO-to-LFO modulation. */
+static void mt_host_shadows(MtHost *h, const int32_t *mod) {
    for (int l = 0; l < 3; ++l)
       for (int k = 0; k < 8; ++k) {
          const int64_t v = (int64_t)h->raw[l][k] * 65536 + (mod ? mod[MT_KNOBS + 8 * l + k] : 0);
          h->shadow[l][k] = v < 0 ? 0 : v > 0x7f0000 ? 0x7f0000 : (int32_t)v;
       }
+}
+
+/* mod: per-parameter additions from the host (word units; SYN..EFX then the
+ * LFO pages), or NULL. */
+static void mt_host_rebuild(MtHost *h, const int32_t *mod) {
+   memcpy(h->block, h->word, sizeof h->block);
+   mt_host_shadows(h, mod);
    if (mod)
       for (int k = 0; k < MT_KNOBS; ++k)
          if (mod[k]) {
@@ -220,6 +226,85 @@ static void mt_host_frame(MtHost *h, const int32_t *mod) {
       h->block[W_LEVEL] = h->word[W_LEVEL];
    }
    if ((f & 7) == 0) mt_lfo_step(h, 24, tick);
+}
+
+/* ---- parameter locks ----------------------------------------------------------
+ * A step's locks (0x2313c4): a locked value is sent whenever the playhead reaches
+ * its step, trig or no trig. A parameter returns to its kit value only at the
+ * next step with an AMP trig that does not lock it. on[page]: the parameters now
+ * away from the kit. Writes (id, value) in the firmware's order, value -1 for a
+ * return to the kit; returns how many. */
+static int mt_step_locks(uint8_t on[7], const int8_t lock[MT_LOCKS], int amp, int *ids, int *values) {
+   int n = 0;
+   for (int id = 0; id < MT_LOCKS; ++id) {
+      const int page = id >> 3, bit = 1 << (id & 7);
+      if (lock[id] >= 0) {
+         ids[n] = id; values[n++] = lock[id];
+         on[page] |= (uint8_t)bit;
+      } else if (amp && (on[page] & bit)) {
+         ids[n] = id; values[n++] = -1;
+         on[page] &= (uint8_t)~bit;
+      }
+   }
+   return n;
+}
+
+/* One queued lock, as the frame routine applies it (0x2483e6): straight into the
+ * word the DSP gets and the knob's target, with no slew. word: value << 16. */
+static void mt_host_lock(MtHost *h, int id, int32_t word) {
+   const int page = id >> 3, k = id & 7;
+   if (page < 4) {
+      h->knob[id] = word;
+      h->word[page ? (page - 1) * 8 + k : W_SYN + k] = word;
+   } else h->raw[page - 4][k] = word >> 16;
+}
+/* After a frame's locks: each LFO with a locked parameter is evaluated again (0x248318). */
+static void mt_host_locked_lfos(MtHost *h, const int32_t *mod, unsigned lfos) {
+   mt_host_shadows(h, mod);
+   for (int l = 0; l < 3; ++l)
+      if (lfos >> l & 1) mt_lfo_evaluate(h, l, 0, 0);
+}
+
+/* ---- POLY's voice allocator (note on 0x2449ba, note off 0x2448e2) ---------------
+ * Six (note, voice) slots, newest first: [0, count) sound, the rest are free, the
+ * most recently freed first, each keeping the note it last played. */
+typedef struct { int note[MT_VOICES], voice[MT_VOICES], count; } MtAlloc;
+
+static void mt_alloc_reset(MtAlloc *a) {
+   for (int i = 0; i < MT_VOICES; ++i) { a->note[i] = -1; a->voice[i] = i; }
+   a->count = 0;
+}
+/* The voice for a new note. *stolen: the note it must release first, or -1. */
+static int mt_alloc_on(MtAlloc *a, int note, int *stolen) {
+   int slot = MT_VOICES - 1;
+   *stolen = -1;
+   if (a->count == MT_VOICES) *stolen = a->note[slot];
+   else {
+      for (int i = a->count; i < MT_VOICES; ++i)
+         if (a->note[i] == note) { slot = i; break; }
+      a->count++;
+   }
+   const int voice = a->voice[slot];
+   memmove(a->note + 1, a->note, (size_t)slot * sizeof *a->note);
+   memmove(a->voice + 1, a->voice, (size_t)slot * sizeof *a->voice);
+   a->note[0] = note;
+   a->voice[0] = voice;
+   return voice;
+}
+/* Frees every slot sounding this note, oldest first; returns how many voices it wrote. */
+static int mt_alloc_off(MtAlloc *a, int note, int *voices) {
+   int n = 0;
+   for (int i = a->count - 1; i >= 0; --i) {
+      if (a->note[i] != note) continue;
+      const int voice = a->voice[i];
+      a->count--;
+      memmove(a->note + i, a->note + i + 1, (size_t)(a->count - i) * sizeof *a->note);
+      memmove(a->voice + i, a->voice + i + 1, (size_t)(a->count - i) * sizeof *a->voice);
+      a->note[a->count] = note;
+      a->voice[a->count] = voice;
+      voices[n++] = voice;
+   }
+   return n;
 }
 
 #endif

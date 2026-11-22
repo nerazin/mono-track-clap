@@ -6,7 +6,10 @@
  * and the main CPU's knob slew and three LFOs. This file adds what surrounds a
  * track in a DAW:
  *  - the notes: one voice, the last note held wins; releasing it returns to
- *    the previous note still held (a new trig), or ends the note;
+ *    the previous note still held (a new trig), or ends the note. POLY runs six
+ *    whole tracks from the firmware's voice allocator;
+ *  - 16 trigs on the host's transport, with parameter locks;
+ *  - a Cocoa editor (mono_track_gui.m);
  *  - every hardware data page as a page of Bitwig remote controls;
  *  - MIDI pitch bend, as KIT ASSIGN JOY R/L would send it (MIRR on, PAGE PTCH,
  *    ADD +63) with DEST as Bend Range;
@@ -21,8 +24,7 @@
 #include <string.h>
 #include <strings.h>
 #include "mono_track.h"
-
-enum { P_SYN = 0, P_AMP = 8, P_FILT = 16, P_EFX = 24, P_LFO = 32, P_LEVEL = 56, P_LPKEY, P_HPKEY, P_BEND, P_MTUNE, NPARAM };
+#include "mono_track_ui.h"
 
 typedef struct {
    const char *id, *name, *magic;
@@ -57,13 +59,13 @@ static const char *const lfo_trig[5] = {"FREE", "TRIG", "HOLD", "ONE", "HALF"};
 static const char *const lfo_wave[11] = {"TRI", "ITRI", "SAW", "ISAW", "SQR", "ISQR", "EXP", "IEXP", "RAMP", "IRMP", "RND"};
 static const char *const lfo_mult[7] = {"1X", "2X", "4X", "8X", "16X", "32X", "64X"};
 static const char *const range_name[8] = {"1/12", "2/12", "7/12", "1OCT", "2OCT", "4OCT", "8OCT", "16OC"};
-static const char *const track_label[5] = {"LEVEL", "LP KEY", "HP KEY", "BEND", "MASTER TUNE"};
+static const char *const track_label[10] = {"LEVEL", "LP KEY", "HP KEY", "BEND", "MASTER TUNE", "POLY", "MIDI TRIG SYN", "MIDI TRIG FILT", "MIDI TRIG LFO", "NOTE ENDS LOCK"};
 
 static const char *const features[] = {
    CLAP_PLUGIN_FEATURE_INSTRUMENT, CLAP_PLUGIN_FEATURE_SYNTHESIZER, CLAP_PLUGIN_FEATURE_STEREO, NULL
 };
 #define DESCRIPTOR(m) { .clap_version = CLAP_VERSION_INIT, .id = machines[m].id, .name = machines[m].name, \
-   .vendor = "Independent DSP", .url = "", .manual_url = "", .support_url = "", .version = "0.1.0", \
+   .vendor = "Independent DSP", .url = "", .manual_url = "", .support_url = "", .version = "0.4.0", \
    .description = "A whole Monomachine track: machine, EQ, filter, AMP, SRR, delay, LFOs, ported from its code", .features = features }
 static const clap_plugin_descriptor_t descriptors[MT_MACHINES] = {
    DESCRIPTOR(0), DESCRIPTOR(1), DESCRIPTOR(2), DESCRIPTOR(3), DESCRIPTOR(4), DESCRIPTOR(5), DESCRIPTOR(6), DESCRIPTOR(7),
@@ -80,19 +82,20 @@ static double def_of(int m, int id) {
    if (id < P_AMP) return machines[m].def[id];
    if (id < P_LFO) return knob_def[id / 8 - 1][id % 8];
    if (id < P_LEVEL) return lfo_def[(id - P_LFO) % 8];
-   return id == P_LEVEL ? 100 : id == P_LPKEY || id == P_HPKEY ? 1 : id == P_BEND ? 1 : 440;
+   return id == P_LEVEL ? 100 : id == P_MTUNE ? 440 : id == P_POLY ? 0 : 1;
 }
+static bool is_switch(int id) { return id == P_LPKEY || id == P_HPKEY || id >= P_POLY; }
 static double lo_of(int id) { return id == P_MTUNE ? 400 : 0; }
 static double hi_of(int id) {
    if (id >= P_LFO && id < P_LEVEL && lfo_size[(id - P_LFO) % 8]) return lfo_size[(id - P_LFO) % 8] - 1;
-   return id == P_MTUNE ? 499.9 : id == P_BEND ? 7 : id == P_LPKEY || id == P_HPKEY ? 1 : 127;
+   return id == P_MTUNE ? 499.9 : id == P_BEND ? 7 : is_switch(id) ? 1 : 127;
 }
 /* an LFO parameter's value as the kit byte the OS reads */
 static int lfo_raw(int field, double v) {
    const int n = lfo_size[field], k = (int)lrint(v);
    return n ? (k * 128 + n - 1) / n : k;
 }
-static bool stepped(int id) { return (id >= P_LFO && id < P_LEVEL) || id == P_LPKEY || id == P_HPKEY || id == P_BEND; }
+static bool stepped(int id) { return (id >= P_LFO && id < P_LEVEL) || is_switch(id) || id == P_BEND; }
 
 /* ---- sample-rate conversion (windowed sinc, as in Mono Delay) -------------- */
 
@@ -149,23 +152,53 @@ static Frame rs_pop(Resampler *r) {
 
 /* ---- plug-in --------------------------------------------------------------- */
 
+/* One DSP track. Mono uses the first; POLY all six. */
+enum { PEND_ON = 1, PEND_OFF = 2, PEND_FILT = 4, PEND_LFO = 8 };   /* ON/OFF share the firmware's AMP cell: the last wins */
+typedef struct {
+   MtHost cpu;
+   MonoTrack track;
+   bool settled, quick, reload;       /* quick: assigned by POLY, so the machine starts from its init */
+   bool gate;                         /* a MIDI note started the AMP, so its release ends it */
+   /* the keys held, in the order pressed; the note sounding; the frame's news */
+   int held[128], nheld, note;
+   unsigned pending;
+   int32_t y[2][MT_FRAMES];
+} Voice;
+
+enum { UI_WANT = 1, UI_TOUCH = 2, UI_DIRTY = 4 };   /* the editor's gesture open; begun; a new value */
+#define SEQ_STOPPED INT64_MIN
+enum { QUEUE_NONE = -2, QUEUE_KIT = -1 };
+/* In samples. A step starts this early, so its locks are in before a note on the same beat. */
+#define SEQ_LEAD 2.0
+/* In samples. A host position this far behind the last one is rounding, not a jump back. */
+#define SEQ_SLACK 32.0
+
 typedef struct {
    clap_plugin_t plugin;
    const clap_host_t *host;
    int machine;
    _Atomic uint64_t value[NPARAM];    /* parameter values (double bits): host thread and audio thread */
    _Atomic bool text_dirty;           /* an LFO's PAGE changed: its DEST reads differently */
+   _Atomic bool pattern_loaded;       /* new state: the sounding locks are stale */
+   _Atomic uint8_t ui_flag[NPARAM];   /* editor -> host: see UI_* */
+   bool ui_open[NPARAM];              /* gestures the host has been told about */
+   MtUi ui;
+   void *gui;
+   uint32_t gui_w, gui_h;
    double mod[NPARAM];
    /* audio thread */
-   bool active, direct, settled;
+   bool active, direct, poly;
    uint32_t latency, blocks;
    int pos;
    int bend;                          /* the pitch bend's top 8 bits, 128 at the centre */
-   double tempo;
-   /* notes: the keys held, in the order pressed; the note sounding; the frame's news (1 on, 2 off) */
-   int held[128], nheld, note, pending;
-   MtHost cpu;
-   MonoTrack track;
+   double tempo, rate;
+   MtAlloc alloc;
+   bool poly_held[128];               /* POLY: pitches held through MIDI in (0x2bc018) */
+   int64_t seq_tick;                  /* the sixteenth the playhead is in */
+   uint8_t lock_on[7];                /* parameters away from the kit (0x2bc7c0) */
+   int8_t queue[MT_LOCKS];            /* the next frame's locks: a value, QUEUE_KIT or QUEUE_NONE */
+   bool queued;
+   Voice voice[MT_VOICES];
    double out[2][MT_FRAMES];
    Resampler down;
 } Plugin;
@@ -183,29 +216,38 @@ static void set_value(Plugin *s, int id, double x) { atomic_store_explicit(&s->v
 static int32_t tick_of(double bpm) { return (int32_t)clamp(lround(24.0 * bpm), 720, 7200); }
 
 /* The machine's own start, which on the unit is long over by the first note. */
-static void machine_start(Plugin *s) {
+static void machine_start(Plugin *s, Voice *v) {
 #ifndef MT_NO_START
-   MonoTrack *t = &s->track;
-   const int32_t *syn = s->cpu.block + W_SYN;
+   MonoTrack *t = &v->track;
+   const int32_t *syn = v->cpu.block + W_SYN;
    int32_t x[2][MT_FRAMES] = {{0}};
    if (s->machine == MT_NOIS)
       for (int n = 0; n < NOIS_START; ++n) mg_block(&t->gnd, syn, 0, x);
    else if (s->machine == MT_ENS) {
       int32_t pan[2];
-      ms_pan(s->cpu.word[W_PAN], pan);
+      ms_pan(v->cpu.word[W_PAN], pan);
       for (int n = 0; n < ENS_START; ++n) {
          memset(x, 0, sizeof x);
          ms_chorus(&t->sw, syn, pan, x);
       }
    }
 #else
-   (void)s;
+   (void)s; (void)v;
 #endif
 }
 
+static double active_or(const Plugin *s, int id) {
+   const int a = id < MT_LOCKS ? atomic_load_explicit(&s->ui.active[id], memory_order_relaxed) : -1;
+   return a >= 0 ? a : value(s, id);
+}
+/* A lockable parameter's word: value << 16, an LFO list entry as its kit byte. */
+static int32_t lock_word(int id, double v) {
+   return id >= P_LFO ? lfo_raw((id - P_LFO) % 8, v) * 65536 : (int32_t)lrint(clamp(v, 0, 127) * 65536.0);
+}
+
 /* Start of a control frame (three blocks): the words the main CPU sends. */
-static void control_frame(Plugin *s) {
-   MtHost *h = &s->cpu;
+static void control_frame(Plugin *s, Voice *v) {
+   MtHost *h = &v->cpu;
    int32_t mod[MT_KNOBS + 24];
    bool any = false;
    for (int p = 0; p < P_LEVEL; ++p) {
@@ -213,48 +255,95 @@ static void control_frame(Plugin *s) {
       mod[p] = s->mod[p] == 0 ? 0 : (int32_t)lrint(s->mod[p] * (n ? 128.0 / n : 1.0) * 65536.0);
       any |= mod[p] != 0;
    }
-   for (int p = 0; p < MT_KNOBS; ++p) h->knob[p] = (int32_t)lrint(clamp(value(s, p), 0, 127) * 65536.0);
+   for (int p = 0; p < MT_KNOBS; ++p) h->knob[p] = (int32_t)lrint(clamp(active_or(s, p), 0, 127) * 65536.0);
    for (int l = 0; l < 3; ++l)
-      for (int k = 0; k < 8; ++k) h->raw[l][k] = lfo_raw(k, value(s, P_LFO + 8 * l + k));
+      for (int k = 0; k < 8; ++k) h->raw[l][k] = lfo_raw(k, active_or(s, P_LFO + 8 * l + k));
    h->level = (int32_t)lrint(clamp(value(s, P_LEVEL) + s->mod[P_LEVEL], 0, 127) * 65536.0);
    h->bend = mf_bend(s->bend, (int)lrint(value(s, P_BEND)));
-   const bool start = !s->settled;
+   const bool start = !v->settled;
    if (start) mt_host_reset(h);
    const int32_t tick = tick_of(s->tempo);
    h->word[W_TICK] = tick;
    h->word[W_RECIP] = 0x800000 / tick;
-   h->word[W_PITCH] = (s->note << 11) / 12;
+   h->word[W_PITCH] = (v->note << 11) / 12;
    h->word[W_MTUNE] = mf_master_tune((int)lrint(clamp(value(s, P_MTUNE) * 10, 4000, 4999)));
    h->word[W_ROUTE] = 1 | (value(s, P_LPKEY) >= 0.5 ? MT_LP_KEY : 0) | (value(s, P_HPKEY) >= 0.5 ? MT_HP_KEY : 0);
-   h->word[W_NOTE] = s->pending == 1 ? 0x81 : s->pending == 2 ? 0x02 : 0;
-   h->word[W_FTRIG] = s->pending == 1;
-   if (s->pending == 1) h->lfo_trig = 1;
-   s->pending = 0;
+   const unsigned news = v->pending;
+   h->word[W_NOTE] = news & PEND_ON ? 0x81 : news & PEND_OFF ? 0x02 : 0;
+   h->word[W_FTRIG] = (news & PEND_FILT) != 0;
+   if (news & PEND_LFO) h->lfo_trig = 1;
+   v->pending = 0;
+   if (v->reload && (news & PEND_ON)) {   /* POLY: the voice takes the sound at its next note, with no slew (0x24b998) */
+      v->reload = false;
+      for (int k = 0; k < MT_KNOBS; ++k) h->word[k < 8 ? W_SYN + k : k - 8] = h->knob[k];
+      h->word[W_LEVEL] = h->level;
+   }
    if (start) {   /* the machine's assignment: its init and trig routines, the glide at the note, the AMP idle */
-      mt_reset(&s->track, s->machine, h->word[W_PITCH]);
-      md_settle(&s->track.delay, h->knob[24 + 3], (uint32_t)tick);
+      mt_reset(&v->track, s->machine, h->word[W_PITCH]);
+      md_settle(&v->track.delay, h->knob[24 + 3], (uint32_t)tick);
       h->word[W_NOTE] |= 0x80;
    }
+   unsigned lfos = 0;
+   if (s->queued)
+      for (int id = 0; id < MT_LOCKS; ++id) {
+         if (s->queue[id] == QUEUE_NONE) continue;
+         mt_host_lock(h, id, lock_word(id, s->queue[id] >= 0 ? s->queue[id] : value(s, id)));
+         if (id >= P_LFO) lfos |= 1u << ((id - P_LFO) / 8);
+      }
+   if (lfos) mt_host_locked_lfos(h, any ? mod : NULL, lfos);
    mt_host_frame(h, any ? mod : NULL);
    h->word[W_NOTE] = h->word[W_FTRIG] = 0;
-   if (start) machine_start(s);
-   s->settled = true;
+   if (start && !v->quick) machine_start(s, v);
+   v->quick = false;
+   v->settled = true;
+}
+
+/* POLY on or off (0x24a342): every held note is released; on, the voices take the track's machine and sound. */
+static void poly_sync(Plugin *s) {
+   const bool on = value(s, P_POLY) >= 0.5;
+   if (on == s->poly) return;
+   s->poly = on;
+   mt_alloc_reset(&s->alloc);
+   memset(s->poly_held, 0, sizeof s->poly_held);
+   for (int i = 0; i < MT_VOICES; ++i) {
+      Voice *v = &s->voice[i];
+      v->nheld = 0;
+      v->gate = false;
+      if (i == 0) { v->pending = PEND_OFF; v->reload = on; continue; }
+      v->pending = 0;
+      v->note = s->voice[0].note;
+      v->settled = false;
+      v->quick = true;
+      v->reload = false;
+   }
 }
 
 /* One frame at 44.1 kHz; a block is computed at its first frame. */
 static void native_frame(Plugin *s, double out[2]) {
    if (s->pos == 0) {
       const bool frame_start = s->blocks % 3 == 0;
-      if (frame_start) control_frame(s);
+      if (frame_start) poly_sync(s);
+      const int voices = s->poly ? MT_VOICES : 1;
       s->blocks++;
-      int32_t y[2][MT_FRAMES];
-      mt_block(&s->track, s->cpu.block, y);
+      for (int n = 0; n < voices; ++n) {
+         Voice *v = &s->voice[n];
+         if (frame_start) control_frame(s, v);
+         mt_block(&v->track, v->cpu.block, v->y);
 #ifdef MT_CHECK
-      if (mt_check_hook) mt_check_hook(&s->track, s->cpu.block, (const int32_t (*)[MT_FRAMES])y);
+         if (mt_check_hook) mt_check_hook(&v->track, v->cpu.block, (const int32_t (*)[MT_FRAMES])v->y);
 #endif
-      s->cpu.block[W_NOTE] = s->cpu.block[W_FTRIG] = 0;   /* one-shots: only the frame's first block carries them */
+         v->cpu.block[W_NOTE] = v->cpu.block[W_FTRIG] = 0;   /* one-shots: only the frame's first block carries them */
+      }
+      if (frame_start && s->queued) { memset(s->queue, QUEUE_NONE, sizeof s->queue); s->queued = false; }
       for (int c = 0; c < 2; ++c)
-         for (int i = 0; i < MT_FRAMES; ++i) s->out[c][i] = y[c][i] / 8388608.0;
+         for (int i = 0; i < MT_FRAMES; ++i) {
+            int32_t sum = 0;   /* the bus mix: every running sum goes through the 24-bit limiter */
+            for (int n = 0; n < voices; ++n) {
+               sum += s->voice[n].y[c][i];
+               sum = sum > 0x7fffff ? 0x7fffff : sum < -0x800000 ? -0x800000 : sum;
+            }
+            s->out[c][i] = sum / 8388608.0;
+         }
    }
    out[0] = s->out[0][s->pos];
    out[1] = s->out[1][s->pos];
@@ -273,38 +362,149 @@ static void host_frame(Plugin *s, double out[2]) {
    out[1] = f.x[1];
 }
 
+static void seq_clear(Plugin *s) {
+   for (int i = 0; i < MT_LOCKS; ++i) atomic_store_explicit(&s->ui.active[i], -1, memory_order_relaxed);
+   memset(s->lock_on, 0, sizeof s->lock_on);
+   memset(s->queue, QUEUE_NONE, sizeof s->queue);
+   s->queued = false;
+}
+
 static void reset(Plugin *s) {
-   s->settled = false;
+   for (int i = 0; i < MT_VOICES; ++i) {
+      Voice *v = &s->voice[i];
+      v->settled = v->quick = v->reload = v->gate = false;
+      v->nheld = 0;
+      v->note = 60;
+      v->pending = 0;
+   }
+   s->poly = value(s, P_POLY) >= 0.5;
+   mt_alloc_reset(&s->alloc);
+   memset(s->poly_held, 0, sizeof s->poly_held);
    s->blocks = 0;
    s->pos = 0;
-   s->nheld = 0;
-   s->note = 60;
-   s->pending = 0;
    s->bend = 128;
+   s->seq_tick = SEQ_STOPPED;
+   seq_clear(s);
+   atomic_store_explicit(&s->ui.step, -1, memory_order_relaxed);
    rs_reset(&s->down);
 }
 
-static void note_on(Plugin *s, int key) {
-   for (int i = 0; i < s->nheld; ++i)
-      if (s->held[i] == key) { memmove(s->held + i, s->held + i + 1, (size_t)(--s->nheld - i) * sizeof *s->held); break; }
-   s->held[s->nheld++] = key;
-   s->note = key;
-   s->pending = 1;
+/* What a MIDI note trigs: the three MIDI TRIG switches. */
+static unsigned midi_trigs(const Plugin *s) {
+   return (value(s, P_TRIG_SYN) >= 0.5 ? PEND_ON : 0u) | (value(s, P_TRIG_FILT) >= 0.5 ? PEND_FILT : 0u)
+        | (value(s, P_TRIG_LFO) >= 0.5 ? PEND_LFO : 0u);
 }
-static void note_off(Plugin *s, int key) {
-   for (int i = 0; i < s->nheld; ++i)
-      if (s->held[i] == key) {
-         memmove(s->held + i, s->held + i + 1, (size_t)(--s->nheld - i) * sizeof *s->held);
-         if (key != s->note) return;
-         if (s->nheld) { s->note = s->held[s->nheld - 1]; s->pending = 1; }
-         else s->pending = 2;
+static void voice_trig(Voice *v, unsigned t) {
+   if (t & PEND_ON) v->pending &= ~(unsigned)PEND_OFF;
+   v->pending |= t;
+}
+/* A key's release ends only a sound a key started: with MIDI TRIG SYN off, the trigs' sounds stay. */
+static void voice_release(Voice *v) {
+   if (v->gate) v->pending = (v->pending & ~(unsigned)PEND_ON) | PEND_OFF;
+   v->gate = false;
+}
+static void voice_on(Plugin *s, Voice *v, int key) {
+   for (int i = 0; i < v->nheld; ++i)
+      if (v->held[i] == key) { memmove(v->held + i, v->held + i + 1, (size_t)(--v->nheld - i) * sizeof *v->held); break; }
+   v->held[v->nheld++] = key;
+   v->note = key;
+   const unsigned t = midi_trigs(s);
+   if (t & PEND_ON) v->gate = true;
+   voice_trig(v, t);
+}
+static void voice_off(Plugin *s, Voice *v, int key) {
+   for (int i = 0; i < v->nheld; ++i)
+      if (v->held[i] == key) {
+         memmove(v->held + i, v->held + i + 1, (size_t)(--v->nheld - i) * sizeof *v->held);
+         if (key != v->note) return;
+         if (v->nheld) { v->note = v->held[v->nheld - 1]; voice_trig(v, midi_trigs(s)); }
+         else voice_release(v);
          return;
       }
+}
+static void seq_note(Plugin *s);
+static void note_on(Plugin *s, int key) {
+   seq_note(s);
+   if (!s->poly) { voice_on(s, &s->voice[0], key); return; }
+   if (s->poly_held[key]) return;   /* a repeat with no note-off */
+   s->poly_held[key] = true;
+   int stolen;
+   Voice *v = &s->voice[mt_alloc_on(&s->alloc, key, &stolen)];
+   if (stolen >= 0) voice_off(s, v, stolen);
+   voice_on(s, v, key);
+}
+static void note_off(Plugin *s, int key) {
+   if (!s->poly) { voice_off(s, &s->voice[0], key); return; }
+   if (!s->poly_held[key]) return;
+   s->poly_held[key] = false;
+   int freed[MT_VOICES];
+   const int n = mt_alloc_off(&s->alloc, key, freed);
+   for (int i = 0; i < n; ++i) voice_off(s, &s->voice[freed[i]], key);
+}
+
+/* ---- the 16 trigs -------------------------------------------------------------- */
+
+static int step_of(int64_t tick) { return (int)(((tick % MT_STEPS) + MT_STEPS) % MT_STEPS); }
+
+/* Queues what mt_step_locks found. only_returns: leave the step's own locks alone. */
+static void seq_apply(Plugin *s, int step, bool trig, bool only_returns) {
+   int8_t lock[MT_LOCKS];
+   int ids[MT_LOCKS], values[MT_LOCKS];
+   for (int i = 0; i < MT_LOCKS; ++i) lock[i] = atomic_load_explicit(&s->ui.lock[step][i], memory_order_relaxed);
+   const int n = mt_step_locks(s->lock_on, lock, trig, ids, values);
+   for (int i = 0; i < n; ++i) {
+      if (only_returns && values[i] >= 0) continue;
+      s->queue[ids[i]] = (int8_t)(values[i] >= 0 ? values[i] : QUEUE_KIT);
+      s->queued = true;
+      atomic_store_explicit(&s->ui.active[ids[i]], (int8_t)values[i], memory_order_relaxed);
+   }
+}
+
+/* The playhead reaches a step. A trig plays no note, since a step has no pitch: it
+ * restarts the filter envelope and the LFOs and ends locks. In POLY those trigs
+ * reach only the poly track's own voice (0x24bb50, CC 99 = 0x7f), voice 0 here. */
+static void seq_step(Plugin *s, int step) {
+   const bool trig = atomic_load_explicit(&s->ui.trig, memory_order_relaxed) >> step & 1;
+   seq_apply(s, step, trig, false);
+   if (trig) voice_trig(&s->voice[0], PEND_FILT | PEND_LFO);
+   atomic_store_explicit(&s->ui.step, step, memory_order_relaxed);
+}
+/* pos, frame: the playhead and one sample, in sixteenths. */
+static void seq_advance(Plugin *s, double pos, double frame) {
+   pos += SEQ_LEAD * frame;
+   const int64_t tick = (int64_t)floor(pos);
+   if (tick == s->seq_tick) return;
+   if (tick == s->seq_tick - 1 && (double)s->seq_tick - pos < SEQ_SLACK * frame) return;
+   s->seq_tick = tick;
+   seq_step(s, step_of(tick));
+}
+/* A MIDI note on the running pattern: shown under its step, and by default it ends
+ * every lock except the ones its own step holds. */
+static void seq_note(Plugin *s) {
+   if (s->seq_tick == SEQ_STOPPED) return;
+   const int step = step_of(s->seq_tick);
+   atomic_fetch_add_explicit(&s->ui.notes[step], 1, memory_order_relaxed);
+   if (value(s, P_LOCK_END) >= 0.5) seq_apply(s, step, true, true);
+}
+/* Stop (0x2358e6): every locked parameter returns to the kit. */
+static void seq_stop(Plugin *s) {
+   for (int id = 0; id < MT_LOCKS; ++id)
+      if (s->lock_on[id >> 3] >> (id & 7) & 1) {
+         s->queue[id] = QUEUE_KIT;
+         s->queued = true;
+         atomic_store_explicit(&s->ui.active[id], -1, memory_order_relaxed);
+      }
+   memset(s->lock_on, 0, sizeof s->lock_on);
+   s->seq_tick = SEQ_STOPPED;
+   atomic_store_explicit(&s->ui.step, -1, memory_order_relaxed);
 }
 
 static bool plug_init(const clap_plugin_t *p) { (void)p; return true; }
 static void plug_destroy(const clap_plugin_t *p) {
    Plugin *s = p->plugin_data;
+#ifndef MT_CHECK
+   if (s->gui) mt_gui_destroy(s->gui);
+#endif
    free(s->down.kernel);
    free(s);
 }
@@ -313,6 +513,7 @@ static bool plug_activate(const clap_plugin_t *p, double rate, uint32_t min, uin
    Plugin *s = p->plugin_data;
    if (s->active || !isfinite(rate) || rate < 8000 || rate > 768000) return false;
    s->direct = rate == NATIVE;
+   s->rate = rate;
    uint32_t latency = 0;
    if (!s->direct) {
       if (!rs_prepare(&s->down, NATIVE, rate)) { free(s->down.kernel); s->down.kernel = NULL; return false; }
@@ -349,7 +550,9 @@ static void event(Plugin *s, const clap_event_header_t *h) {
       const clap_event_param_value_t *e = (const void *)h;
       if (e->param_id < NPARAM && e->note_id == -1 && e->port_index == -1 && e->channel == -1 && e->key == -1 && isfinite(e->value)) {
          const int id = (int)e->param_id;
-         set_value(s, id, clamp(e->value, lo_of(id), hi_of(id)));
+         const double x = clamp(e->value, lo_of(id), hi_of(id));
+         if (id < MT_LOCKS && x != value(s, id)) atomic_store_explicit(&s->ui.active[id], -1, memory_order_relaxed);   /* a new value replaces a sounding lock, as a knob does on the unit */
+         set_value(s, id, x);
          if (id >= P_LFO && id < P_LEVEL && (id - P_LFO) % 8 == L_PAGE) {
             atomic_store(&s->text_dirty, true);
             if (s->host->request_callback) s->host->request_callback(s->host);
@@ -358,7 +561,10 @@ static void event(Plugin *s, const clap_event_header_t *h) {
    } else if (h->type == CLAP_EVENT_PARAM_MOD && h->size >= sizeof(clap_event_param_mod_t)) {
       const clap_event_param_mod_t *e = (const void *)h;
       if (e->param_id <= P_LEVEL && e->note_id == -1 && e->port_index == -1 && e->channel == -1 && e->key == -1 && isfinite(e->amount))
+      {
          s->mod[e->param_id] = clamp(e->amount, -127, 127);
+         atomic_store_explicit(&s->ui.mod[e->param_id], (float)s->mod[e->param_id], memory_order_relaxed);
+      }
    } else if ((h->type == CLAP_EVENT_NOTE_ON || h->type == CLAP_EVENT_NOTE_OFF) && h->size >= sizeof(clap_event_note_t)) {
       const clap_event_note_t *e = (const void *)h;
       if (e->key >= 0 && e->key < 128) { if (h->type == CLAP_EVENT_NOTE_ON) note_on(s, e->key); else note_off(s, e->key); }
@@ -371,16 +577,55 @@ static void event(Plugin *s, const clap_event_header_t *h) {
    }
 }
 
+/* The editor's edits to the host: begin, the latest value, end. Nothing is lost
+ * when the host's queue is full: the flags stay set for the next try. */
+static bool push_gesture(const clap_output_events_t *out, uint16_t type, int id) {
+   const clap_event_param_gesture_t e = {{sizeof e, 0, CLAP_CORE_EVENT_SPACE_ID, type, 0}, (clap_id)id};
+   return out->try_push(out, &e.header);
+}
+static void ui_flush(Plugin *s, const clap_output_events_t *out) {
+   if (!out || !out->try_push) return;
+   for (int i = 0; i < NPARAM; ++i) {
+      const unsigned seen = atomic_load_explicit(&s->ui_flag[i], memory_order_acquire);
+      if (!(seen & (UI_TOUCH | UI_DIRTY)) && ((seen & UI_WANT) != 0) == s->ui_open[i]) continue;
+      const unsigned f = atomic_fetch_and_explicit(&s->ui_flag[i], (uint8_t)UI_WANT, memory_order_acq_rel);
+      bool ok = true;
+      if (!s->ui_open[i]) {
+         ok = push_gesture(out, CLAP_EVENT_PARAM_GESTURE_BEGIN, i);
+         s->ui_open[i] = ok;
+      }
+      if (ok && (f & UI_DIRTY)) {
+         const clap_event_param_value_t e = {{sizeof e, 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0}, (clap_id)i, NULL, -1, -1, -1, -1, value(s, i)};
+         ok = out->try_push(out, &e.header);
+      }
+      if (ok && !(f & UI_WANT)) {
+         ok = push_gesture(out, CLAP_EVENT_PARAM_GESTURE_END, i);
+         if (ok) s->ui_open[i] = false;
+      }
+      if (!ok) {
+         atomic_fetch_or_explicit(&s->ui_flag[i], (uint8_t)(f & (UI_TOUCH | UI_DIRTY)), memory_order_acq_rel);
+         return;
+      }
+   }
+}
+
 static clap_process_status plug_process(const clap_plugin_t *p, const clap_process_t *pr) {
    Plugin *s = p->plugin_data;
    if (!s->active || !pr || pr->audio_outputs_count < 1) return CLAP_PROCESS_ERROR;
    clap_audio_buffer_t *out = &pr->audio_outputs[0];
    if (out->channel_count < 2 || (!out->data32 && !out->data64)) return CLAP_PROCESS_ERROR;
    s->tempo = pr->transport && (pr->transport->flags & CLAP_TRANSPORT_HAS_TEMPO) && isfinite(pr->transport->tempo) ? pr->transport->tempo : 120.0;
+   if (atomic_exchange_explicit(&s->pattern_loaded, false, memory_order_relaxed)) seq_clear(s);
+   const clap_event_transport_t *tr = pr->transport;
+   const bool playing = tr && (tr->flags & CLAP_TRANSPORT_IS_PLAYING) && (tr->flags & CLAP_TRANSPORT_HAS_BEATS_TIMELINE);
+   const double beat = playing ? (double)tr->song_pos_beats / (double)CLAP_BEATTIME_FACTOR : 0.0, per_frame = s->tempo / (60.0 * s->rate);
+   if (!playing && s->seq_tick != SEQ_STOPPED) seq_stop(s);
+   if (playing && s->seq_tick == SEQ_STOPPED) s->seq_tick = (int64_t)floor((beat - per_frame) * 4.0);   /* so a start exactly on a step plays it */
    const clap_input_events_t *ev = pr->in_events;
    const uint32_t count = ev && ev->size && ev->get ? ev->size(ev) : 0;
    uint32_t next = 0;
    for (uint32_t n = 0; n < pr->frames_count; ++n) {
+      if (playing) seq_advance(s, (beat + n * per_frame) * 4.0, per_frame * 4.0);   /* before the events: a step's locks precede its notes */
       for (; next < count; ++next) {
          const clap_event_header_t *h = ev->get(ev, next);
          if (h && h->time > n) break;
@@ -392,6 +637,7 @@ static clap_process_status plug_process(const clap_plugin_t *p, const clap_proce
          if (out->data32) out->data32[c][n] = (float)y[c]; else out->data64[c][n] = y[c];
    }
    for (; next < count; ++next) event(s, ev->get(ev, next));
+   ui_flush(s, pr->out_events);
    out->constant_mask = 0;
    return CLAP_PROCESS_CONTINUE;
 }
@@ -470,7 +716,7 @@ static bool params_to_text(const clap_plugin_t *p, clap_id cid, double v, char *
       case L_MULT: snprintf(out, cap, "%s", lfo_mult[k]); break;
       default: snprintf(out, cap, "%d", k); break;
       }
-   } else if (id == P_LPKEY || id == P_HPKEY) snprintf(out, cap, "%s", v >= 0.5 ? "ON" : "OFF");
+   } else if (is_switch(id)) snprintf(out, cap, "%s", v >= 0.5 ? "ON" : "OFF");
    else if (id == P_BEND) snprintf(out, cap, "%s", range_name[(int)lrint(clamp(v, 0, 7))]);
    else if (id == P_MTUNE) snprintf(out, cap, "%.1f Hz", lrint(clamp(v, 400, 499.9) * 10) / 10.0);
    else if (bipolar(m, id)) snprintf(out, cap, "%+.1f", v - 64);
@@ -498,7 +744,7 @@ static bool params_from_text(const clap_plugin_t *p, clap_id cid, const char *te
             if (!strcasecmp(text, dest_name(s->machine, page, d))) { *v = d; return true; }
       }
    }
-   if (id == P_LPKEY || id == P_HPKEY) {
+   if (is_switch(id)) {
       if (!strcasecmp(text, "on")) { *v = 1; return true; }
       if (!strcasecmp(text, "off")) { *v = 0; return true; }
    }
@@ -513,22 +759,34 @@ static bool params_from_text(const clap_plugin_t *p, clap_id cid, const char *te
    return true;
 }
 static void params_flush(const clap_plugin_t *p, const clap_input_events_t *in, const clap_output_events_t *out) {
-   (void)out;
    const uint32_t n = in && in->size && in->get ? in->size(in) : 0;
    for (uint32_t i = 0; i < n; ++i) {
       const clap_event_header_t *h = in->get(in, i);
       if (h && (h->type == CLAP_EVENT_PARAM_VALUE || h->type == CLAP_EVENT_PARAM_MOD)) event(p->plugin_data, h);
    }
+   ui_flush(p->plugin_data, out);
 }
 static const clap_plugin_params_t params = {params_count, params_info, params_get, params_to_text, params_from_text, params_flush};
 
+/* Version 1 (0.1.0) held the first 61 parameters; version 2 (0.2.0) 65, then the
+ * pattern: the trig mask and every step's locks; version 3 adds NOTE ENDS LOCK. */
+#define STATE_V1 (8 + 8 * 61)
+#define STATE_WITH(n) (8 + 8 * (n) + 2 + MT_STEPS * MT_LOCKS)
+#define STATE_V3 STATE_WITH(NPARAM)
 static bool state_save(const clap_plugin_t *p, const clap_ostream_t *st) {
    const Plugin *s = p->plugin_data;
-   uint8_t buf[8 + 8 * NPARAM] = {0};
+   uint8_t buf[STATE_V3] = {0};
    memcpy(buf, machines[s->machine].magic, 4);
-   buf[7] = 1;
+   buf[7] = 3;
    for (int i = 0; i < NPARAM; ++i)
       for (int b = 0; b < 8; ++b) buf[8 + 8 * i + b] = (uint8_t)(to_bits(value(s, i)) >> (8 * b));
+   uint8_t *pat = buf + 8 + 8 * NPARAM;
+   const unsigned trig = atomic_load_explicit(&s->ui.trig, memory_order_relaxed);
+   pat[0] = (uint8_t)trig;
+   pat[1] = (uint8_t)(trig >> 8);
+   for (int t = 0; t < MT_STEPS; ++t)
+      for (int i = 0; i < MT_LOCKS; ++i)
+         pat[2 + t * MT_LOCKS + i] = (uint8_t)atomic_load_explicit(&s->ui.lock[t][i], memory_order_relaxed);
    for (uint64_t done = 0; done < sizeof buf;) {
       const int64_t n = st && st->write ? st->write(st, buf + done, sizeof buf - done) : -1;
       if (n <= 0) return false;
@@ -538,21 +796,39 @@ static bool state_save(const clap_plugin_t *p, const clap_ostream_t *st) {
 }
 static bool state_load(const clap_plugin_t *p, const clap_istream_t *st) {
    Plugin *s = p->plugin_data;
-   uint8_t buf[8 + 8 * NPARAM];
-   for (uint64_t done = 0; done < sizeof buf;) {
-      const int64_t n = st && st->read ? st->read(st, buf + done, sizeof buf - done) : -1;
-      if (n <= 0) return false;
-      done += (uint64_t)n;
+   uint8_t buf[STATE_V3];
+   uint64_t got = 0;
+   while (got < sizeof buf) {
+      const int64_t n = st && st->read ? st->read(st, buf + got, sizeof buf - got) : -1;
+      if (n < 0) return false;
+      if (n == 0) break;
+      got += (uint64_t)n;
    }
-   if (memcmp(buf, machines[s->machine].magic, 4) || buf[4] || buf[5] || buf[6] || buf[7] != 1) return false;
+   if (got < 8 || memcmp(buf, machines[s->machine].magic, 4) || buf[4] || buf[5] || buf[6]) return false;
+   if (buf[7] < 1 || buf[7] > 3) return false;
+   const int count = buf[7] == 1 ? 61 : buf[7] == 2 ? 65 : NPARAM;
+   if (got != (buf[7] == 1 ? (uint64_t)STATE_V1 : (uint64_t)STATE_WITH(count))) return false;
    double v[NPARAM];
    for (int i = 0; i < NPARAM; ++i) {
+      if (i >= count) { v[i] = def_of(s->machine, i); continue; }
       uint64_t u = 0;
       for (int b = 0; b < 8; ++b) u |= (uint64_t)buf[8 + 8 * i + b] << (8 * b);
       v[i] = bits_to(u);
       if (!isfinite(v[i]) || v[i] < lo_of(i) || v[i] > hi_of(i)) return false;
    }
+   const uint8_t *pat = buf[7] >= 2 ? buf + 8 + 8 * count : NULL;
+   if (pat)
+      for (int t = 0; t < MT_STEPS; ++t)
+         for (int i = 0; i < MT_LOCKS; ++i) {
+            const int x = (int8_t)pat[2 + t * MT_LOCKS + i];
+            if (x < -1 || x > hi_of(i)) return false;
+         }
    for (int i = 0; i < NPARAM; ++i) set_value(s, i, v[i]);
+   atomic_store_explicit(&s->ui.trig, pat ? (uint16_t)(pat[0] | pat[1] << 8) : 0, memory_order_relaxed);
+   for (int t = 0; t < MT_STEPS; ++t)
+      for (int i = 0; i < MT_LOCKS; ++i)
+         atomic_store_explicit(&s->ui.lock[t][i], pat ? (int8_t)pat[2 + t * MT_LOCKS + i] : -1, memory_order_relaxed);
+   atomic_store_explicit(&s->pattern_loaded, true, memory_order_relaxed);
    const clap_host_params_t *hp = s->host->get_extension ? s->host->get_extension(s->host, CLAP_EXT_PARAMS) : NULL;
    if (hp && hp->rescan) hp->rescan(s->host, CLAP_PARAM_RESCAN_VALUES | CLAP_PARAM_RESCAN_TEXT);
    return true;
@@ -570,7 +846,7 @@ static bool remote_get(const clap_plugin_t *p, uint32_t i, clap_remote_controls_
    snprintf(page->page_name, sizeof page->page_name, "%s", names[i]);
    page->page_id = i;
    for (int k = 0; k < CLAP_REMOTE_CONTROLS_COUNT; ++k)
-      page->param_ids[k] = i == 7 ? (k < 5 ? (clap_id)(P_LEVEL + k) : CLAP_INVALID_ID)
+      page->param_ids[k] = i == 7 ? (k < 6 ? (clap_id)(P_LEVEL + k) : CLAP_INVALID_ID)
                          : i == 0 && hidden(s->machine, k) ? CLAP_INVALID_ID : (clap_id)(8 * i + k);
    return true;
 }
@@ -589,6 +865,9 @@ static bool notes_get(const clap_plugin_t *p, uint32_t i, bool input, clap_note_
 }
 static const clap_plugin_note_ports_t notes = {notes_count, notes_get};
 
+#ifndef MT_CHECK
+static const clap_plugin_gui_t gui_ext;
+#endif
 static const void *plug_extension(const clap_plugin_t *p, const char *id) {
    (void)p;
    if (!id) return NULL;
@@ -598,8 +877,102 @@ static const void *plug_extension(const clap_plugin_t *p, const char *id) {
    if (!strcmp(id, CLAP_EXT_REMOTE_CONTROLS) || !strcmp(id, CLAP_EXT_REMOTE_CONTROLS_COMPAT)) return &remote;
    if (!strcmp(id, CLAP_EXT_LATENCY)) return &latency;
    if (!strcmp(id, CLAP_EXT_NOTE_PORTS)) return &notes;
+#ifndef MT_CHECK
+   if (!strcmp(id, CLAP_EXT_GUI)) return &gui_ext;
+#endif
    return NULL;
 }
+
+/* ---- the editor ------------------------------------------------------------- */
+
+#ifndef MT_CHECK
+static void ui_request_flush(const Plugin *s) {
+   const clap_host_params_t *hp = s->host->get_extension ? s->host->get_extension(s->host, CLAP_EXT_PARAMS) : NULL;
+   if (hp && hp->request_flush) hp->request_flush(s->host);
+}
+void mt_ui_begin(const clap_plugin_t *p, int id) {
+   Plugin *s = p->plugin_data;
+   atomic_fetch_or_explicit(&s->ui_flag[id], (uint8_t)(UI_WANT | UI_TOUCH), memory_order_acq_rel);
+   ui_request_flush(s);
+}
+void mt_ui_set(const clap_plugin_t *p, int id, double x) {
+   Plugin *s = p->plugin_data;
+   x = clamp(x, lo_of(id), hi_of(id));
+   if (stepped(id)) x = round(x);
+   if (id < MT_LOCKS && x != value(s, id)) atomic_store_explicit(&s->ui.active[id], -1, memory_order_relaxed);
+   set_value(s, id, x);
+   atomic_fetch_or_explicit(&s->ui_flag[id], (uint8_t)UI_DIRTY, memory_order_acq_rel);
+   if (id >= P_LFO && id < P_LEVEL && (id - P_LFO) % 8 == L_PAGE) {
+      atomic_store(&s->text_dirty, true);
+      if (s->host->request_callback) s->host->request_callback(s->host);
+   }
+   ui_request_flush(s);
+}
+void mt_ui_end(const clap_plugin_t *p, int id) {
+   Plugin *s = p->plugin_data;
+   atomic_fetch_and_explicit(&s->ui_flag[id], (uint8_t)~UI_WANT, memory_order_acq_rel);
+   ui_request_flush(s);
+}
+void mt_ui_pattern_changed(const clap_plugin_t *p) {
+   const Plugin *s = p->plugin_data;
+   const clap_host_state_t *hs = s->host->get_extension ? s->host->get_extension(s->host, CLAP_EXT_STATE) : NULL;
+   if (hs && hs->mark_dirty) hs->mark_dirty(s->host);
+}
+int mt_ui_bipolar(const clap_plugin_t *p, int id) { return bipolar(((const Plugin *)p->plugin_data)->machine, id); }
+int mt_ui_unused(const clap_plugin_t *p, int id) { return hidden(((const Plugin *)p->plugin_data)->machine, id); }
+
+static bool gui_supported(const clap_plugin_t *p, const char *api, bool floating) { (void)p; return api && !strcmp(api, CLAP_WINDOW_API_COCOA) && !floating; }
+static bool gui_preferred(const clap_plugin_t *p, const char **api, bool *floating) { (void)p; *api = CLAP_WINDOW_API_COCOA; *floating = false; return true; }
+static bool gui_create(const clap_plugin_t *p, const char *api, bool floating) {
+   Plugin *s = p->plugin_data;
+   if (s->gui || !gui_supported(p, api, floating)) return false;
+   s->gui = mt_gui_create(p, &s->ui);
+   if (s->gui) mt_gui_set_size(s->gui, s->gui_w, s->gui_h);
+   return s->gui != NULL;
+}
+static void gui_destroy(const clap_plugin_t *p) {
+   Plugin *s = p->plugin_data;
+   if (s->gui) mt_gui_destroy(s->gui);
+   s->gui = NULL;
+}
+static bool gui_set_scale(const clap_plugin_t *p, double scale) { (void)p; (void)scale; return false; }   /* Cocoa works in points */
+static bool gui_get_size(const clap_plugin_t *p, uint32_t *w, uint32_t *h) { const Plugin *s = p->plugin_data; *w = s->gui_w; *h = s->gui_h; return true; }
+static bool gui_can_resize(const clap_plugin_t *p) { (void)p; return true; }
+static bool gui_hints(const clap_plugin_t *p, clap_gui_resize_hints_t *r) {
+   (void)p;
+   *r = (clap_gui_resize_hints_t){true, true, true, MT_GUI_W, MT_GUI_H};
+   return true;
+}
+static bool gui_adjust(const clap_plugin_t *p, uint32_t *w, uint32_t *h) {
+   (void)p;
+   const double x = clamp(fmax(*w, (double)*h * MT_GUI_W / MT_GUI_H), MT_GUI_W * 0.6, MT_GUI_W * 2.0);
+   *w = (uint32_t)lround(x);
+   *h = (uint32_t)lround(x * MT_GUI_H / MT_GUI_W);
+   return true;
+}
+static bool gui_set_size(const clap_plugin_t *p, uint32_t w, uint32_t h) {
+   Plugin *s = p->plugin_data;
+   if (!s->gui) return false;
+   s->gui_w = w;
+   s->gui_h = h;
+   mt_gui_set_size(s->gui, w, h);
+   return true;
+}
+static bool gui_set_parent(const clap_plugin_t *p, const clap_window_t *w) {
+   Plugin *s = p->plugin_data;
+   if (!s->gui || !w || !w->cocoa) return false;
+   mt_gui_set_parent(s->gui, w->cocoa);
+   return true;
+}
+static bool gui_set_transient(const clap_plugin_t *p, const clap_window_t *w) { (void)p; (void)w; return false; }
+static void gui_suggest_title(const clap_plugin_t *p, const char *t) { (void)p; (void)t; }
+static bool gui_show(const clap_plugin_t *p) { Plugin *s = p->plugin_data; if (!s->gui) return false; mt_gui_show(s->gui); return true; }
+static bool gui_hide(const clap_plugin_t *p) { Plugin *s = p->plugin_data; if (!s->gui) return false; mt_gui_hide(s->gui); return true; }
+static const clap_plugin_gui_t gui_ext = {
+   gui_supported, gui_preferred, gui_create, gui_destroy, gui_set_scale, gui_get_size, gui_can_resize, gui_hints,
+   gui_adjust, gui_set_size, gui_set_parent, gui_set_transient, gui_suggest_title, gui_show, gui_hide,
+};
+#endif
 
 /* ---- factory and entry ----------------------------------------------------- */
 
@@ -616,8 +989,21 @@ static const clap_plugin_t *factory_create(const clap_plugin_factory_t *f, const
    s->host = host;
    s->machine = m;
    s->tempo = 120.0;
+   s->rate = NATIVE;
+   s->gui_w = MT_GUI_W;
+   s->gui_h = MT_GUI_H;
    for (int i = 0; i < NPARAM; ++i) atomic_init(&s->value[i], to_bits(def_of(m, i)));
    atomic_init(&s->text_dirty, false);
+   atomic_init(&s->pattern_loaded, false);
+   atomic_init(&s->ui.trig, 0);
+   atomic_init(&s->ui.step, -1);
+   for (int t = 0; t < MT_STEPS; ++t) atomic_init(&s->ui.notes[t], 0);
+   memset(s->queue, QUEUE_NONE, sizeof s->queue);
+   for (int i = 0; i < NPARAM; ++i) { atomic_init(&s->ui_flag[i], 0); atomic_init(&s->ui.mod[i], 0.f); }
+   for (int i = 0; i < MT_LOCKS; ++i) {
+      atomic_init(&s->ui.active[i], -1);
+      for (int t = 0; t < MT_STEPS; ++t) atomic_init(&s->ui.lock[t][i], -1);
+   }
    s->plugin = (clap_plugin_t){
       .desc = &descriptors[m], .plugin_data = s, .init = plug_init, .destroy = plug_destroy,
       .activate = plug_activate, .deactivate = plug_deactivate, .start_processing = plug_start,
