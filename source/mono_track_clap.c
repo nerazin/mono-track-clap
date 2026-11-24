@@ -30,17 +30,17 @@ typedef struct {
    const char *id, *name, *magic;
    const char *label[8];
    unsigned char def[8];
-   unsigned unused, bipolar;   /* knobs the machine does not read (hidden); knobs shown as value - 64 */
+   unsigned unused, bipolar;   /* knobs the machine does not read (hidden); knobs shown as value - 64, as the unit flags them */
 } Machine;
 static const Machine machines[MT_MACHINES] = {
    {"works.reconstruction.monotrack.sin", "Mono Track GND SIN", "MTSN", {"-", "-", "-", "-", "-", "-", "-", "TUNE"}, {0, 0, 0, 0, 0, 0, 0, 64}, 0x7f, 0x80},
    {"works.reconstruction.monotrack.nois", "Mono Track GND NOIS", "MTNS", {"ST", "RED", "STON", "-", "-", "-", "-", "TUNE"}, {0, 0, 0, 0, 0, 0, 0, 64}, 0x78, 0x80},
    {"works.reconstruction.monotrack.saw", "Mono Track SWAVE SAW", "MTSW", {"UNIL", "UNIW", "UNIX", "-", "SUBX", "SUB1", "SUB2", "TUNE"}, {0, 0, 0, 0, 0, 0, 0, 64}, 0x08, 0x80},
-   {"works.reconstruction.monotrack.puls", "Mono Track SWAVE PULS", "MTPL", {"UNIL", "UNIW", "SUB1", "SUB2", "PW", "PWAD", "PWRS", "TUNE"}, {0, 0, 0, 0, 64, 0, 0, 64}, 0, 0x80},
-   {"works.reconstruction.monotrack.ens", "Mono Track SWAVE ENS", "MTEN", {"PCH2", "PCH3", "PCH4", "WAVE", "PW", "CHRL", "CHRW", "TUNE"}, {63, 63, 63, 0, 64, 0, 127, 64}, 0, 0x80},
+   {"works.reconstruction.monotrack.puls", "Mono Track SWAVE PULS", "MTPL", {"UNIL", "UNIW", "SUB1", "SUB2", "PW", "PWAD", "PWRS", "TUNE"}, {0, 0, 0, 0, 64, 0, 0, 64}, 0, 0x90},
+   {"works.reconstruction.monotrack.ens", "Mono Track SWAVE ENS", "MTEN", {"PCH2", "PCH3", "PCH4", "WAVE", "PW", "CHRL", "CHRW", "TUNE"}, {63, 63, 63, 0, 64, 0, 127, 64}, 0, 0x90},
    {"works.reconstruction.monotrack.fmstat", "Mono Track FM+ STAT", "MTFS", {"1FRQ", "1FIN", "1ENV", "1FB", "2FRQ", "2VOL", "TONE", "TUNE"}, {60, 64, 80, 30, 80, 64, 98, 64}, 0, 0x82},
    {"works.reconstruction.monotrack.fmpar", "Mono Track FM+ PAR", "MTFP", {"1FRQ", "1ENV", "2FRQ", "2ENV", "3FRQ", "3ENV", "TONE", "TUNE"}, {60, 64, 80, 64, 102, 80, 98, 64}, 0, 0x80},
-   {"works.reconstruction.monotrack.fmdyn", "Mono Track FM+ DYN", "MTFD", {"1FRQ", "1FEN", "1VOL", "1VEN", "2FRQ", "2ENV", "2FB", "TUNE"}, {64, 64, 64, 64, 74, 80, 30, 64}, 0, 0x80},
+   {"works.reconstruction.monotrack.fmdyn", "Mono Track FM+ DYN", "MTFD", {"1FRQ", "1FEN", "1VOL", "1VEN", "2FRQ", "2ENV", "2FB", "TUNE"}, {64, 64, 64, 64, 74, 80, 30, 64}, 0, 0x8a},
 };
 static const char *const page_name[4] = {"SYN", "AMP", "FILT", "EFX"};
 static const char *const knob_label[3][8] = {
@@ -54,10 +54,11 @@ static const char *const lfo_label[8] = {"PAGE", "DEST", "TRIG", "WAVE", "MULT",
 /* PAGE DEST TRIG WAVE MULT are lists: the knob holds the entry, sent as the first raw value that selects it */
 static const unsigned char lfo_def[8] = {0, 4, 0, 0, 0, 64, 0, 0};
 static const unsigned char lfo_size[8] = {9, 8, 5, 11, 7, 0, 0, 0};
-static const char *const lfo_page[9] = {"PTCH", "SYN", "AMP", "FILT", "EFX", "LFO1", "LFO2", "LFO3", "MIDI"};
+static const char *const lfo_page[9] = {"PTCH", "SYNT", "AMP", "FILT", "EFFX", "LFO1", "LFO2", "LFO3", "MIDI"};
 static const char *const lfo_trig[5] = {"FREE", "TRIG", "HOLD", "ONE", "HALF"};
-static const char *const lfo_wave[11] = {"TRI", "ITRI", "SAW", "ISAW", "SQR", "ISQR", "EXP", "IEXP", "RAMP", "IRMP", "RND"};
+static const char *const lfo_wave[11] = {"TRI", "ITRI", "SAW", "ISAW", "SQR", "ISQR", "EXP", "IEXP", "RMP", "IRMP", "RND"};
 static const char *const lfo_mult[7] = {"1X", "2X", "4X", "8X", "16X", "32X", "64X"};
+static const char *const midi_label[8] = {"LEN", "VEL", "PB", "PCHG", "CC 1", "CC 2", "CC 3", "CC 4"};
 static const char *const range_name[8] = {"1/12", "2/12", "7/12", "1OCT", "2OCT", "4OCT", "8OCT", "16OC"};
 static const char *const track_label[10] = {"LEVEL", "LP KEY", "HP KEY", "BEND", "MASTER TUNE", "POLY", "MIDI TRIG SYN", "MIDI TRIG FILT", "MIDI TRIG LFO", "NOTE ENDS LOCK"};
 
@@ -65,7 +66,7 @@ static const char *const features[] = {
    CLAP_PLUGIN_FEATURE_INSTRUMENT, CLAP_PLUGIN_FEATURE_SYNTHESIZER, CLAP_PLUGIN_FEATURE_STEREO, NULL
 };
 #define DESCRIPTOR(m) { .clap_version = CLAP_VERSION_INIT, .id = machines[m].id, .name = machines[m].name, \
-   .vendor = "Independent DSP", .url = "", .manual_url = "", .support_url = "", .version = "0.4.1", \
+   .vendor = "Independent DSP", .url = "", .manual_url = "", .support_url = "", .version = "0.4.2", \
    .description = "A whole Monomachine track: machine, EQ, filter, AMP, SRR, delay, LFOs, ported from its code", .features = features }
 static const clap_plugin_descriptor_t descriptors[MT_MACHINES] = {
    DESCRIPTOR(0), DESCRIPTOR(1), DESCRIPTOR(2), DESCRIPTOR(3), DESCRIPTOR(4), DESCRIPTOR(5), DESCRIPTOR(6), DESCRIPTOR(7),
@@ -696,7 +697,7 @@ static const char *dest_name(int m, int page, int dest) {
    if (page == 1) return machines[m].label[dest];
    if (page <= 4) return knob_label[page - 2][dest];
    if (page <= 7) return lfo_label[dest];
-   return "CC";
+   return midi_label[dest];
 }
 static bool bipolar(int m, int id) {
    if (id < P_AMP) return machines[m].bipolar >> id & 1;
@@ -711,6 +712,47 @@ static int ens_step(double v) {
 }
 static double ens_semitones(int s) {
    return ms_ens_steps[s].num ? 12 * log2((double)ms_ens_steps[s].num / ms_ens_steps[s].den) : ms_ens_steps[s].semi;
+}
+/* SYN knobs the unit shows as words or ratios (the main OS's knob descriptors at
+ * 0x258f58): STON and PWRS as OFF/ON; FM+ STAT's and PAR's xFRQ as one of the 24
+ * listed ratios, DYN's 1FRQ (2 x knob) and 2FRQ (4 x knob^2) as the ratio. */
+static bool is_onoff(int m, int id) { return (m == MT_NOIS && id == P_SYN + 2) || (m == MT_PULS && id == P_SYN + 6); }
+static bool is_listed(int m, int id) { return (m == MT_STAT && (id == 0 || id == 4)) || (m == MT_PAR && (id == 0 || id == 2 || id == 4)); }
+static bool is_dyn_ratio(int m, int id) { return m == MT_DYN && (id == 0 || id == 4); }
+static int32_t knob_word(double v) { return (int32_t)lrint(clamp(v, 0, 127) * 65536.0); }
+static double dyn_ratio(int id, int32_t w) { const double x = w / 8388608.0; return id ? 4 * x * x : 2 * x; }
+/* As the unit writes a ratio: these as fractions, others with three decimals
+ * below 1 and two above, cut off, x.00 and x.50 shortened; the 24 listed ratios
+ * of 1 and above as plain numbers. */
+static void ratio_text(char *out, uint32_t cap, double r, bool listed) {
+   static const unsigned char named[16][2] = {{1, 64}, {1, 32}, {1, 16}, {3, 32}, {1, 8}, {5, 32}, {3, 16}, {1, 4},
+                                              {5, 16}, {3, 8}, {7, 16}, {1, 2}, {9, 16}, {5, 8}, {3, 4}, {7, 8}};
+   for (int i = 0; i < 16; ++i)
+      if (r * named[i][1] == named[i][0]) { snprintf(out, cap, "%d/%d", named[i][0], named[i][1]); return; }
+   const int c = (int)floor(r * 100);
+   if (listed) snprintf(out, cap, "%g", r);
+   else if (r == 0) snprintf(out, cap, "0.0");
+   else if (r < 1) snprintf(out, cap, ".%03d", (int)floor(r * 1000));
+   else if (c % 100 == 0 || c % 100 == 50) snprintf(out, cap, "%d.%d", c / 100, c % 100 / 10);
+   else snprintf(out, cap, "%d.%02d", c / 100, c % 100);
+}
+/* DYN's texts where the unit's own list departs from that rule */
+static const char *dyn_fix(int id, int32_t w) {
+   if (w & 0xffff) return NULL;
+   const int k = w >> 16;
+   return k == 127 ? (id ? "4.0" : "2.0") : !id ? NULL : k == 2 ? ".001" : k == 24 ? "9/64" : NULL;
+}
+/* a typed number or fraction ("3/2"); 2 when it was a fraction */
+static int parse_number(const char *text, double *x) {
+   char *end = NULL;
+   *x = strtod(text, &end);
+   if (end == text || !isfinite(*x)) return 0;
+   if (*end != '/') return 1;
+   const char *den = end + 1;
+   const double d = strtod(den, &end);
+   if (end == den || !(d > 0) || !isfinite(d)) return 0;
+   *x /= d;
+   return 2;
 }
 static bool params_to_text(const clap_plugin_t *p, clap_id cid, double v, char *out, uint32_t cap) {
    const Plugin *s = p->plugin_data;
@@ -732,6 +774,12 @@ static bool params_to_text(const clap_plugin_t *p, clap_id cid, double v, char *
       if (ms_ens_steps[st].num) snprintf(out, cap, "%+.2f st", ens_semitones(st));
       else if (ms_ens_steps[st].semi) snprintf(out, cap, "%+d st", ms_ens_steps[st].semi);
       else snprintf(out, cap, "OFF");
+   } else if (is_onoff(m, id)) snprintf(out, cap, "%s", knob_word(v) >= 0x400000 ? "ON" : "OFF");
+   else if (is_listed(m, id)) ratio_text(out, cap, mf_ratio_of(knob_word(v)) / 1048576.0, true);
+   else if (is_dyn_ratio(m, id)) {
+      const char *fix = dyn_fix(id, knob_word(v));
+      if (fix) snprintf(out, cap, "%s", fix);
+      else ratio_text(out, cap, dyn_ratio(id, knob_word(v)), false);
    } else if (id == P_BEND) snprintf(out, cap, "%s", range_name[(int)lrint(clamp(v, 0, 7))]);
    else if (id == P_MTUNE) snprintf(out, cap, "%.1f Hz", lrint(clamp(v, 400, 499.9) * 10) / 10.0);
    else if (bipolar(m, id)) snprintf(out, cap, "%+.1f", v - 64);
@@ -767,11 +815,17 @@ static bool params_from_text(const clap_plugin_t *p, clap_id cid, const char *te
       const int i = match(text, range_name, 8);
       if (i >= 0) { *v = i; return true; }
    }
-   char *end = NULL;
-   const double x = strtod(text, &end);
-   if (is_ens_pitch(s->machine, id)) {   /* "OFF" or semitones: the first knob value of the nearest interval */
+   const int m = s->machine;
+   if (is_onoff(m, id)) {
+      if (!strcasecmp(text, "on")) { *v = 127; return true; }
+      if (!strcasecmp(text, "off")) { *v = 0; return true; }
+   }
+   double x;
+   const int kind = parse_number(text, &x);
+   if (is_ens_pitch(m, id)) {   /* "OFF", semitones or a ratio: the first knob value of the nearest interval */
       const bool off = !strcasecmp(text, "off");
-      if (!off && (end == text || !isfinite(x))) return false;
+      if (!off && (!kind || (kind == 2 && !(x > 0)))) return false;
+      if (kind == 2) x = 12 * log2(x);
       double gap = 1e9;
       for (int st = 0, k = 0; st < 33; k += ms_ens_steps[st++].run) {
          const double d = off ? (ms_ens_steps[st].num || ms_ens_steps[st].semi) : fabs(ens_semitones(st) - x);
@@ -779,8 +833,22 @@ static bool params_from_text(const clap_plugin_t *p, clap_id cid, const char *te
       }
       return true;
    }
-   if (end == text || !isfinite(x)) return false;
-   *v = clamp(bipolar(s->machine, id) ? x + 64 : x, lo_of(id), hi_of(id));
+   if (!kind) return false;
+   if (is_listed(m, id)) {   /* the first knob value of the nearest listed ratio */
+      if (!(x > 0)) return false;
+      double gap = 1e9;
+      for (int k = 0; k < 128; ++k) {
+         const double d = fabs(log(mf_ratio_of(k << 16) / 1048576.0 / x));
+         if (d < gap - 1e-9) { gap = d; *v = k; }
+      }
+      return true;
+   }
+   if (is_dyn_ratio(m, id)) {   /* rounded up to the next word, as the texts are cut off */
+      const double k = id ? 64 * sqrt(fmax(x, 0)) : 64 * x;
+      *v = clamp(ceil(k * 65536 - 1e-6) / 65536, 0, 127);
+      return true;
+   }
+   *v = clamp(bipolar(m, id) ? x + 64 : x, lo_of(id), hi_of(id));
    return true;
 }
 static void params_flush(const clap_plugin_t *p, const clap_input_events_t *in, const clap_output_events_t *out) {

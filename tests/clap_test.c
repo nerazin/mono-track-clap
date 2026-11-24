@@ -234,8 +234,38 @@ int main(int argc, char **argv) {
          CHECK(pe->text_to_value(e, SYN, "7.02", &v) && pe->value_to_text(e, SYN, v, t, sizeof t) && !strcmp(t, "+7.02 st"), "typed 7.02: %s", t);
          CHECK(pe->text_to_value(e, SYN, "off", &v) && pe->value_to_text(e, SYN, v, t, sizeof t) && !strcmp(t, "OFF"), "typed off: %s", t);
          CHECK(pe->value_to_text(e, SYN + 3, 20, t, sizeof t) && !strcmp(t, "20.0"), "WAVE stays a number: %s", t);
+         CHECK(pe->text_to_value(e, SYN, "3/2", &v) && pe->value_to_text(e, SYN, v, t, sizeof t) && !strcmp(t, "+7.02 st"), "typed 3/2: %s", t);
+         CHECK(pe->value_to_text(e, SYN + 4, 64, t, sizeof t) && !strcmp(t, "+0.0"), "ENS PW is bipolar: %s", t);
          e->destroy(e);
       }
+      {   /* the SYN knobs the unit shows as words or ratios */
+         static const struct { int machine, id; double v; const char *text; } shown[] = {
+            {1, SYN + 2, 63, "OFF"}, {1, SYN + 2, 64, "ON"}, {3, SYN + 6, 64, "ON"}, {3, SYN + 4, 64, "+0.0"},
+            {5, SYN, 60, "1/2"}, {5, SYN, 27, "5/32"}, {5, SYN + 4, 5, "1/32"}, {5, SYN + 4, 127, "4"}, {6, SYN + 2, 85, "1.25"},
+            {7, SYN, 0, "0.0"}, {7, SYN, 1, "1/64"}, {7, SYN, 3, ".046"}, {7, SYN, 64, "1.0"}, {7, SYN, 96, "1.5"}, {7, SYN, 71, "1.10"},
+            {7, SYN, 127, "2.0"}, {7, SYN + 4, 2, ".001"}, {7, SYN + 4, 24, "9/64"}, {7, SYN + 4, 74, "1.33"}, {7, SYN + 4, 127, "4.0"},
+            {7, SYN + 1, 64, "+0.0"}, {7, SYN + 3, 60, "-4.0"},
+         };
+         static const struct { int machine, id; const char *typed, *text; } typed[] = {
+            {5, SYN, "3/16", "3/16"}, {5, SYN, "1.3", "1.25"}, {6, SYN + 4, "0.2", "3/16"}, {7, SYN, "1.5", "1.5"}, {7, SYN, ".3", ".300"},
+            {7, SYN + 4, "9/64", "9/64"}, {7, SYN + 4, "2", "2.0"}, {7, SYN + 4, "4", "4.0"}, {1, SYN + 2, "on", "ON"},
+         };
+         for (unsigned i = 0; i < sizeof shown / sizeof shown[0]; ++i) {
+            const clap_plugin_t *e = create(shown[i].machine);
+            const clap_plugin_params_t *pe = e->get_extension(e, CLAP_EXT_PARAMS);
+            CHECK(pe->value_to_text(e, shown[i].id, shown[i].v, t, sizeof t) && !strcmp(t, shown[i].text), "machine %d knob %d at %g: %s", shown[i].machine, shown[i].id, shown[i].v, t);
+            e->destroy(e);
+         }
+         for (unsigned i = 0; i < sizeof typed / sizeof typed[0]; ++i) {
+            const clap_plugin_t *e = create(typed[i].machine);
+            const clap_plugin_params_t *pe = e->get_extension(e, CLAP_EXT_PARAMS);
+            double v;
+            CHECK(pe->text_to_value(e, typed[i].id, typed[i].typed, &v) && pe->value_to_text(e, typed[i].id, v, t, sizeof t) && !strcmp(t, typed[i].text), "machine %d knob %d typed %s: %s", typed[i].machine, typed[i].id, typed[i].typed, t);
+            e->destroy(e);
+         }
+      }
+      CHECK(pa->value_to_text(p, LFO, 1, t, sizeof t) && !strcmp(t, "SYNT"), "page list: %s", t);
+      CHECK(pa->value_to_text(p, LFO + 3, 8, t, sizeof t) && !strcmp(t, "RMP"), "wave list: %s", t);
       CHECK(pa->value_to_text(p, LFO + 2, 4, t, sizeof t) && !strcmp(t, "HALF"), "trig list: %s", t);
       CHECK(pa->value_to_text(p, LFO + 4, 6, t, sizeof t) && !strcmp(t, "64X"), "mult list: %s", t);
       CHECK(pa->value_to_text(p, LFO + 1, 3, t, sizeof t) && !strcmp(t, "1OCT"), "PTCH dest: %s", t);
@@ -245,6 +275,8 @@ int main(int argc, char **argv) {
       CHECK(pa->value_to_text(p, LFO + 1, 2, t, sizeof t) && !strcmp(t, "UNIX"), "SYN dest: %s", t);
       set_params(p, (Set[]){{LFO, 6}}, 1);
       CHECK(pa->value_to_text(p, LFO + 1, 7, t, sizeof t) && !strcmp(t, "DPTH"), "LFO dest: %s", t);
+      set_params(p, (Set[]){{LFO, 8}}, 1);
+      CHECK(pa->value_to_text(p, LFO + 1, 0, t, sizeof t) && !strcmp(t, "LEN"), "MIDI dest: %s", t);
 
       /* state */
       set_params(p, (Set[]){{SYN, 33}, {FILT + 1, 77}, {EFX + 3, 21}, {LFO + 8 + 3, 5}, {LEVEL, 90}, {HPKEY, 0}}, 6);

@@ -118,20 +118,48 @@ SYN by machine:
 | FM+ PAR | 1FRQ 1ENV 2FRQ 2ENV 3FRQ 3ENV TONE TUNE |
 | FM+ DYN | 1FRQ 1FEN 1VOL 1VEN 2FRQ 2ENV 2FB TUNE |
 
-On ENS, PCH2, PCH3 and PCH4 show each oscillator's interval to the first in
-semitones. Equal-tempered steps read as whole semitones ("+7 st"), and the
-just intervals show their cents ("+7.02 st" is 3/2, "-3.86 st" is 4/5). At
-unison the oscillator is muted, so the knob reads OFF. Typing a number of
-semitones picks the nearest interval.
+Values read as on the unit's display, taken from the knob descriptors in its
+main OS:
+
+- Knobs the unit shows as −64 to +63 read as the value − 64: TUNE, PW on PULS
+  and ENS, 1FIN on FM+ STAT, 1FEN and 1VEN on FM+ DYN, DIST, PAN, BOFS, WOFS,
+  EQG and DSND. All others read 0–127.
+- NOIS's STON and PULS's PWRS read OFF or ON (64 and up).
+- FM+ STAT's and PAR's 1FRQ, 2FRQ and 3FRQ read the listed ratio, 1/64 to 4.
+- FM+ DYN's 1FRQ and 2FRQ read their ratio as the unit writes it: a fraction
+  for the listed ratios ("1/4", "9/64"), else three decimals below 1 and two
+  above, cut off (".046", "1.33"). At 127 they read 2.0 and 4.0, like the
+  unit's display; the ratios there are 1.98 and 3.94.
+- ENS's PCH2, PCH3 and PCH4 show each oscillator's interval to the first in
+  semitones. Equal-tempered steps read as whole semitones ("+7 st"), and the
+  just intervals show their cents ("+7.02 st" is 3/2, "-3.86 st" is 4/5). The
+  unit writes these "+07" and "3/2". At unison the oscillator is muted, so the
+  knob reads OFF.
+
+Typed values work the same way: semitones or a ratio such as "3/2" on ENS, a
+ratio such as "3/16" or "1.5" on the FM+ frequencies, OFF or ON.
+
+On two kinds of knob the unit's display names a different step from the one it
+plays, and the plug-in names the step that plays:
+
+- **ENS PCH2-4.** The display picks the interval as knob × 33 / 128 rounded
+  down; the DSP's table is centred, half a step earlier. On 64 of the 128 knob
+  values the display names the interval below the one that sounds.
+- **FM+ STAT and PAR xFRQ.** The display's list has 5/32 in the wrong place
+  (after 3/8), so from 27 to 53 it names the next ratio up. The DSP also picks
+  one step higher than the display at 5, 21, 37, ... 117 (every 16).
+
+Both come from reading the main OS and the DSP code; they were not checked on a
+unit.
 
 The LFO controls:
 
-- **PAGE**: PTCH, SYN, AMP, FILT, EFX, LFO1, LFO2, LFO3, MIDI. MIDI has no
+- **PAGE**: PTCH, SYNT, AMP, FILT, EFFX, LFO1, LFO2, LFO3, MIDI. MIDI has no
   effect here, since a plug-in has no MIDI track to send to.
 - **DEST**: the knob on that page, shown by name. On PTCH it is the range,
-  1/12 to 16OC.
+  1/12 to 16OC; on MIDI, LEN VEL PB PCHG CC 1-4.
 - **TRIG**: FREE, TRIG, HOLD, ONE, HALF. A note is the LFO trig.
-- **WAVE**: TRI, ITRI, SAW, ISAW, SQR, ISQR, EXP, IEXP, RAMP, IRMP, RND.
+- **WAVE**: TRI, ITRI, SAW, ISAW, SQR, ISQR, EXP, IEXP, RMP, IRMP, RND.
 - **MULT**: 1X to 64X. **SPD**, **INTL** and **DPTH**: 0–127.
 
 LFO speed, HOLD, the portamento and the delay time all follow the host's tempo.
@@ -207,6 +235,7 @@ The TRACK page:
 | Which locks a step sends, and returns to the kit | the same | 100,000 steps | 0 differ |
 | Locks applied to the words and LFOs | the same | 54,050 locks over 100,000 frames | 0 differ |
 | Regression hashes (`tests/test_core.c`) | hashes from the firmware | every machine | pass |
+| FM+ DYN's 1FRQ and 2FRQ texts | the main OS's display strings | 256 values | 0 differ |
 
 ¹ With the SRR scratch words above set to 0 in the firmware too.
 
