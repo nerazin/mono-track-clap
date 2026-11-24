@@ -11,11 +11,12 @@ enum {
    P_SYN = 0, P_AMP = 8, P_FILT = 16, P_EFX = 24, P_LFO = 32, P_LEVEL = 56,
    P_LPKEY, P_HPKEY, P_BEND, P_MTUNE, P_POLY, P_TRIG_SYN, P_TRIG_FILT, P_TRIG_LFO, P_LOCK_END, NPARAM
 };
-enum { UI_STEPS = 16, UI_LOCKS = 56 };
+enum { UI_STEPS = 64, UI_PAGE = 16, UI_LOCKS = 56 };
 
 /* Written by the editor or the audio thread, read by the other: all relaxed. */
 typedef struct {
-   _Atomic uint16_t trig;                     /* the steps with a trig */
+   _Atomic uint64_t trig;                     /* the steps with a trig */
+   _Atomic int8_t length, speed;              /* SCALE SETUP: 2-64 steps; 1X 2X 3/4X 3/2X */
    _Atomic int8_t lock[UI_STEPS][UI_LOCKS];   /* each step's locked values, -1 for none */
    _Atomic int8_t active[UI_LOCKS];           /* the lock sounding now, -1 for the kit value */
    _Atomic int step;                          /* the playing step, -1 when stopped */
@@ -36,6 +37,7 @@ void mt_ui_begin(const clap_plugin_t *p, int id);
 void mt_ui_set(const clap_plugin_t *p, int id, double value);   /* outside begin/end it is one whole gesture */
 void mt_ui_end(const clap_plugin_t *p, int id);
 void mt_ui_pattern_changed(const clap_plugin_t *p);
+void mt_ui_set_length(const clap_plugin_t *p, int length);   /* fills pages it reaches, as the unit does */
 int mt_ui_bipolar(const clap_plugin_t *p, int id);
 int mt_ui_unused(const clap_plugin_t *p, int id);
 

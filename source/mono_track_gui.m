@@ -8,6 +8,9 @@
  *
  * Each colour has one meaning: white value, amber lock, violet host modulation,
  * red trig, green trigless step, blue a MIDI note landing on a step.
+ *
+ * The 16 pads show one page of the pattern's up to 64 steps; SCALE picks the page,
+ * the length and the speed, as the unit's SCALE key and SCALE SETUP window do.
  * SPDX-License-Identifier: GPL-3.0-only */
 #import <Cocoa/Cocoa.h>
 #import <QuartzCore/QuartzCore.h>
@@ -17,12 +20,13 @@
 #include "mono_track_ui.h"
 
 /* Plug-ins share one host process, and Objective-C classes one namespace: the version keeps builds apart. */
-#define MTEditorView MonoTrackEditorView_0_4_0
+#define MTEditorView MonoTrackEditorView_0_5_0
 
-enum { C_TITLE, C_KNOB, C_TAB, C_SLIDER, C_SWITCH, C_KEYS, C_PAD, C_CLEAR, C_COPY, C_PASTE, C_MAX = 128 };
+enum { C_TITLE, C_KNOB, C_TAB, C_SLIDER, C_SWITCH, C_KEYS, C_PAD, C_CLEAR, C_COPY, C_PASTE, C_LEN, C_SPEED, C_PAGE, C_MAX = 128 };
 typedef struct { int kind, id, section; NSRect r; const char *label; } Ctl;
 
 static const char *const kSection[5] = {"SYN", "AMP", "FILT", "EFX", "LFO"};
+static const char *const kSpeed[4] = {"1X", "2X", "3/4X", "3/2X"};
 static const char *const kPadKey[16] = {"1", "2", "3", "4", "5", "6", "7", "8", "Q", "W", "E", "R", "T", "Y", "U", "I"};
 /* Physical keys, so Shift and non-Latin layouts do not change them. */
 static const unsigned short kKeyCode[16] = {18, 19, 20, 21, 23, 22, 26, 28, 12, 13, 14, 15, 17, 16, 32, 34};
@@ -89,8 +93,10 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
    uint64_t _sig[C_MAX];
    BOOL _keys;
    unsigned _heldMouse, _heldKey, _heldLatch, _edited;   /* step masks */
-   NSTimeInterval _downAt[16], _noteAt[16];
-   uint32_t _noteSeen[16];
+   NSTimeInterval _downAt[16], _noteAt[UI_STEPS];
+   uint32_t _noteSeen[UI_STEPS];
+   int _page;           /* the page the pads show */
+   double _lenValue;    /* LEN's drag or scroll, between whole steps */
    int _dragCtl, _dragId;
    BOOL _dragMoved, _dragGesture, _scrollIsLock, _scrollDead;
    unsigned _dragHeld, _scrollHeld;      /* the trigs held when this twist began */
@@ -151,17 +157,25 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
       [self add:C_COPY id:i section:0 rect:NSMakeRect(cx - 26, 364, 25, 20) label:"CPY"];
       [self add:C_PASTE id:i section:0 rect:NSMakeRect(cx + 1, 364, 25, 20) label:"PST"];
    }
-   [self add:C_SWITCH id:P_TRIG_SYN section:1 rect:NSMakeRect(936, 302, 60, 28) label:"SYN"];
-   [self add:C_SWITCH id:P_TRIG_FILT section:1 rect:NSMakeRect(1000, 302, 60, 28) label:"FILT"];
-   [self add:C_SWITCH id:P_TRIG_LFO section:1 rect:NSMakeRect(1064, 302, 60, 28) label:"LFO"];
-   [self add:C_SWITCH id:P_LOCK_END section:1 rect:NSMakeRect(1136, 302, 76, 28) label:"NOTE ENDS"];
-   [self add:C_CLEAR id:0 section:0 rect:NSMakeRect(1136, 336, 76, 28) label:"CLR LOCKS"];
+   [self add:C_SWITCH id:P_TRIG_SYN section:1 rect:NSMakeRect(936, 294, 60, 26) label:"SYN"];
+   [self add:C_SWITCH id:P_TRIG_FILT section:1 rect:NSMakeRect(1000, 294, 60, 26) label:"FILT"];
+   [self add:C_SWITCH id:P_TRIG_LFO section:1 rect:NSMakeRect(1064, 294, 60, 26) label:"LFO"];
+   [self add:C_SWITCH id:P_LOCK_END section:1 rect:NSMakeRect(1136, 294, 76, 26) label:"NOTE ENDS"];
+   [self add:C_CLEAR id:0 section:0 rect:NSMakeRect(1136, 346, 76, 26) label:"CLR LOCKS"];
+   [self add:C_LEN id:0 section:0 rect:NSMakeRect(936, 346, 48, 26) label:"LEN"];
+   [self add:C_SPEED id:0 section:0 rect:NSMakeRect(988, 346, 38, 26) label:NULL];
+   static const char *const pages[4] = {"1", "2", "3", "4"};
+   for (int k = 0; k < 4; ++k) [self add:C_PAGE id:k section:0 rect:NSMakeRect(1030 + 24 * k, 346, 22, 26) label:pages[k]];
    return self;
 }
 
 /* ---- what the controls show --------------------------------------------------- */
 
 - (unsigned)held { return _heldMouse | _heldKey | _heldLatch; }
+- (int)stepOf:(int)pad { return UI_PAGE * _page + pad; }
+- (int)length { return atomic_load_explicit(&_ui->length, memory_order_relaxed); }
+- (int)lastPage { return ([self length] - 1) / UI_PAGE; }
+- (int)playing { return atomic_load_explicit(&_ui->step, memory_order_relaxed); }
 - (int)paramOf:(const Ctl *)c { return c->kind == C_KNOB && c->section == 4 ? P_LFO + _tab * 8 + c->id : c->id; }
 - (double)base:(int)ident { double v = 0; _params->get_value(_p, (clap_id)ident, &v); return v; }
 - (int)lockAt:(int)step id:(int)ident { return atomic_load_explicit(&_ui->lock[step][ident], memory_order_relaxed); }
@@ -169,8 +183,8 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
 - (int)heldLock:(int)ident {
    const unsigned h = [self held];
    if (ident >= UI_LOCKS) return -1;
-   for (int t = 0; t < UI_STEPS; ++t)
-      if (h >> t & 1) { const int v = [self lockAt:t id:ident]; if (v >= 0) return v; }
+   for (int t = 0; t < UI_PAGE; ++t)
+      if (h >> t & 1) { const int v = [self lockAt:[self stepOf:t] id:ident]; if (v >= 0) return v; }
    return -1;
 }
 - (int)activeLock:(int)ident { return ident < UI_LOCKS ? atomic_load_explicit(&_ui->active[ident], memory_order_relaxed) : -1; }
@@ -221,8 +235,9 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
       fillRound(r, 6, C(PANEL, 1));
       strokeRound(r, 6, 1, C(LINE, 1));
    }
-   drawText("MIDI TRIGS", NSMakeRect(936, 284, 188, 14), 10, NSFontWeightMedium, C(MUTED, 1), NSTextAlignmentLeft);
-   drawText("LOCKS", NSMakeRect(1136, 284, 76, 14), 10, NSFontWeightMedium, C(MUTED, 1), NSTextAlignmentLeft);
+   drawText("MIDI TRIGS", NSMakeRect(936, 278, 188, 14), 10, NSFontWeightMedium, C(MUTED, 1), NSTextAlignmentLeft);
+   drawText("LOCKS", NSMakeRect(1136, 278, 76, 14), 10, NSFontWeightMedium, C(MUTED, 1), NSTextAlignmentLeft);
+   drawText("SCALE", NSMakeRect(936, 330, 188, 14), 10, NSFontWeightMedium, C(MUTED, 1), NSTextAlignmentLeft);
    for (int i = 0; i < _n; ++i) {
       const Ctl *c = &_c[i];
       if (![self needsToDrawRect:NSInsetRect(c->r, -3, -3)]) continue;
@@ -235,6 +250,7 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
       case C_PAD: [self drawPad:c]; break;
       case C_CLEAR: [self drawClear:c]; break;
       case C_COPY: case C_PASTE: [self drawPadButton:c index:i]; break;
+      case C_LEN: case C_SPEED: case C_PAGE: [self drawScale:c]; break;
       }
    }
 }
@@ -355,13 +371,13 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
 - (void)drawClear:(const Ctl *)c {
    const BOOL can = [self canClear];
    strokeRound(c->r, 5, 1, can ? C(LOCK, 1) : C(LINE, 1));
-   drawText(c->label, NSMakeRect(c->r.origin.x, c->r.origin.y + 7, c->r.size.width, 14), 9.5, NSFontWeightSemibold,
+   drawText(c->label, NSMakeRect(c->r.origin.x, c->r.origin.y + (c->r.size.height - 14) / 2, c->r.size.width, 14), 9.5, NSFontWeightSemibold,
             can ? C(LOCK, 1) : C(MUTED, 0.55), NSTextAlignmentCenter);
 }
 - (BOOL)canClear {
    const unsigned h = [self held];
-   for (int t = 0; t < UI_STEPS; ++t)
-      if ((h >> t & 1) && [self stepPages:t]) return YES;
+   for (int t = 0; t < UI_PAGE; ++t)
+      if ((h >> t & 1) && [self stepPages:[self stepOf:t]]) return YES;
    return NO;
 }
 
@@ -374,7 +390,7 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
    return (atomic_load_explicit(&_ui->trig, memory_order_relaxed) >> step & 1) || [self stepPages:step];
 }
 /* An empty step has nothing to copy, so it cannot replace what is on the clipboard. */
-- (BOOL)padButtonEnabled:(const Ctl *)c { return c->kind == C_COPY ? [self stepHasContent:c->id] : _ui->clip_full; }
+- (BOOL)padButtonEnabled:(const Ctl *)c { return c->kind == C_COPY ? [self stepHasContent:[self stepOf:c->id]] : _ui->clip_full; }
 - (BOOL)flashing:(int)index { return index == _flashCtl && CACurrentMediaTime() - _flashAt < kPressFlash; }
 - (void)drawPadButton:(const Ctl *)c index:(int)index {
    if (![self padButtonsShown:c->id]) return;
@@ -392,8 +408,8 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
 /* Replaces the step: its trig and every lock. */
 - (void)pasteStep:(int)step {
    for (int id = 0; id < UI_LOCKS; ++id) atomic_store_explicit(&_ui->lock[step][id], _ui->clip_lock[id], memory_order_relaxed);
-   if (_ui->clip_trig) atomic_fetch_or_explicit(&_ui->trig, (uint16_t)(1u << step), memory_order_relaxed);
-   else atomic_fetch_and_explicit(&_ui->trig, (uint16_t)~(1u << step), memory_order_relaxed);
+   if (_ui->clip_trig) atomic_fetch_or_explicit(&_ui->trig, 1ull << step, memory_order_relaxed);
+   else atomic_fetch_and_explicit(&_ui->trig, ~(1ull << step), memory_order_relaxed);
    mt_ui_pattern_changed(_p);
 }
 
@@ -404,11 +420,14 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
 - (double)pulse { return 0.72 + 0.28 * sin(2 * M_PI * 2.5 * CACurrentMediaTime()); }
 - (int)pulseLevel { return (int)lround([self pulse] * 8); }
 - (void)drawPad:(const Ctl *)c {
-   const int step = c->id;
+   const int step = [self stepOf:c->id];
    const BOOL trig = atomic_load_explicit(&_ui->trig, memory_order_relaxed) >> step & 1;
    const unsigned pages = [self stepPages:step];
-   const BOOL held = [self held] >> step & 1, latched = _heldLatch >> step & 1;
-   const BOOL playing = atomic_load_explicit(&_ui->step, memory_order_relaxed) == step;
+   const BOOL held = [self held] >> c->id & 1, latched = _heldLatch >> c->id & 1;
+   const BOOL playing = [self playing] == step;
+   CGContextRef g = NSGraphicsContext.currentContext.CGContext;
+   CGContextSaveGState(g);
+   if (step >= [self length]) CGContextSetAlpha(g, 0.3);   /* past the pattern's end: kept, not played */
    const CGFloat cx = NSMidX(c->r), top = c->r.origin.y + 8, a = pages ? [self pulseLevel] / 8.0 : 1;
    const unsigned base = trig ? TRIG : pages ? TRIGLESS : LINE;
    for (int i = 0; i < 7; ++i) {
@@ -430,6 +449,39 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
             held ? C(LOCK, 1) : _keys ? C(TEXT, 1) : C(MUTED, 1), NSTextAlignmentCenter);
    const int note = [self noteLevel:step];
    if (note) fillRound(NSMakeRect(cx - 21, c->r.origin.y + 75, 42, 3), 1.5, C(NOTE, note / 16.0));
+   CGContextRestoreGState(g);
+}
+
+/* SCALE: LEN, the speed, and the four pages. A page button shows that page on the pads
+ * (filled), is lit while the pattern reaches it, and while the playhead is on that page
+ * is outlined white with a tick where it is. A page the pattern does not reach yet extends it. */
+- (void)drawScale:(const Ctl *)c {
+   char t[16];
+   if (c->kind == C_PAGE) {
+      const int play = [self playing];
+      const BOOL shown = c->id == _page, used = c->id <= [self lastPage], here = play >= 0 && play / UI_PAGE == c->id;
+      if (shown) fillRound(c->r, 5, C(VALUE, 1));
+      else strokeRound(c->r, 5, 1, here ? C(VALUE, 0.9) : used ? C(MUTED, 0.8) : C(LINE, 1));
+      drawText(c->label, NSMakeRect(c->r.origin.x, c->r.origin.y + 5, c->r.size.width, 15), 11, NSFontWeightSemibold,
+               shown ? C(DARK, 1) : used ? C(TEXT, 0.85) : C(MUTED, 0.5), NSTextAlignmentCenter);
+      if (here)
+         fillRound(NSMakeRect(c->r.origin.x + 3 + (c->r.size.width - 10) * (play % UI_PAGE) / 15.0, NSMaxY(c->r) - 5, 4, 2), 1,
+                   shown ? C(DARK, 1) : C(VALUE, 1));
+      return;
+   }
+   if (c->kind == C_LEN) snprintf(t, sizeof t, "LEN %d", [self length]);
+   else snprintf(t, sizeof t, "%s", kSpeed[atomic_load_explicit(&_ui->speed, memory_order_relaxed) & 3]);
+   strokeRound(c->r, 5, 1, C(MUTED, 0.8));
+   drawText(t, NSMakeRect(c->r.origin.x, c->r.origin.y + 5, c->r.size.width, 15), 11, NSFontWeightSemibold, C(TEXT, 0.85), NSTextAlignmentCenter);
+}
+/* The pads show another page: what was held on this one is let go. */
+- (void)showPage:(int)k {
+   if (k == _page) return;
+   _page = k;
+   _heldKey = _heldLatch = 0;
+   if (_dragId >= 0) [self endDrag];
+   [self endScroll];
+   self.needsDisplay = YES;
 }
 /* A MIDI note's line under its step: 16 at the note, fading to 0. */
 - (int)noteLevel:(int)step {
@@ -582,12 +634,18 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
       const BOOL shown = [self padButtonsShown:c->id];
       return mix(mix(h, shown), shown ? [self padButtonEnabled:c] * 2 + [self flashing:(int)(c - _c)] : 0);
    }
+   case C_LEN: return mix(h, [self length]);
+   case C_SPEED: return mix(h, atomic_load_explicit(&_ui->speed, memory_order_relaxed));
+   case C_PAGE: {
+      const int play = [self playing];
+      return mix(mix(mix(h, c->id == _page), c->id <= [self lastPage]), play >= 0 && play / UI_PAGE == c->id ? play : -1);
+   }
    default: {
-      const int t = c->id;
+      const int t = [self stepOf:c->id];
       const unsigned pages = [self stepPages:t];
-      h = mix(mix(h, atomic_load_explicit(&_ui->trig, memory_order_relaxed) >> t & 1), pages);
-      h = mix(mix(h, [self held] >> t & 1), _heldLatch >> t & 1);
-      h = mix(mix(h, atomic_load_explicit(&_ui->step, memory_order_relaxed) == t), _keys);
+      h = mix(mix(mix(h, t), atomic_load_explicit(&_ui->trig, memory_order_relaxed) >> t & 1), pages);
+      h = mix(mix(h, [self held] >> c->id & 1), _heldLatch >> c->id & 1);
+      h = mix(mix(mix(h, [self playing] == t), _keys), t >= [self length]);
       return mix(mix(h, pages ? [self pulseLevel] : 0), [self noteLevel:t]);
    }
    }
@@ -596,6 +654,7 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
    (void)sender;
    if (_scrollId >= 0 && CACurrentMediaTime() > _scrollUntil) [self endScroll];
    [self checkHolds];
+   if (_page > [self lastPage]) [self showPage:0];   /* the pattern got shorter: back to the first page, as the unit goes */
    for (int t = 0; t < UI_STEPS; ++t) {
       const uint32_t n = atomic_load_explicit(&_ui->notes[t], memory_order_relaxed);
       if (n != _noteSeen[t]) { _noteSeen[t] = n; _noteAt[t] = CACurrentMediaTime(); }
@@ -688,20 +747,20 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
 - (void)writeLock:(int)ident value:(double)v {
    const unsigned h = [self held];
    const int8_t x = (int8_t)lrint([self clampTo:ident value:v]);
-   for (int t = 0; t < UI_STEPS; ++t)
-      if (h >> t & 1) atomic_store_explicit(&_ui->lock[t][ident], x, memory_order_relaxed);
+   for (int t = 0; t < UI_PAGE; ++t)
+      if (h >> t & 1) atomic_store_explicit(&_ui->lock[[self stepOf:t]][ident], x, memory_order_relaxed);
    _edited |= h;
    mt_ui_pattern_changed(_p);
 }
 - (void)clearLock:(int)ident {
    const unsigned h = [self held];
-   for (int t = 0; t < UI_STEPS; ++t)
-      if (h >> t & 1) atomic_store_explicit(&_ui->lock[t][ident], -1, memory_order_relaxed);
+   for (int t = 0; t < UI_PAGE; ++t)
+      if (h >> t & 1) atomic_store_explicit(&_ui->lock[[self stepOf:t]][ident], -1, memory_order_relaxed);
    _edited |= h;
    mt_ui_pattern_changed(_p);
 }
 - (void)toggleTrig:(int)step {
-   atomic_fetch_xor_explicit(&_ui->trig, (uint16_t)(1u << step), memory_order_relaxed);
+   atomic_fetch_xor_explicit(&_ui->trig, 1ull << [self stepOf:step], memory_order_relaxed);
    mt_ui_pattern_changed(_p);
 }
 - (void)padDown:(int)step { _downAt[step] = CACurrentMediaTime(); _edited &= ~(1u << step); }
@@ -735,21 +794,35 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
       _dragCtl = i;
       break;
    case C_TAB: _tab = c->id; _dragCtl = i; break;
+   case C_PAGE:
+      if (c->id > [self lastPage]) mt_ui_set_length(_p, UI_PAGE * (c->id + 1));   /* the unit's SCALE: whole pages */
+      [self showPage:c->id];
+      break;
+   case C_SPEED:
+      atomic_store_explicit(&_ui->speed, (int8_t)((atomic_load_explicit(&_ui->speed, memory_order_relaxed) + 1) & 3), memory_order_relaxed);
+      mt_ui_pattern_changed(_p);
+      break;
+   case C_LEN:
+      if (e.clickCount == 2) { mt_ui_set_length(_p, 16); break; }
+      _lenValue = [self length];
+      _dragCtl = i;
+      _dragLast = pt;
+      break;
    case C_KEYS: [self setKeys:!_keys]; break;
    case C_SWITCH: mt_ui_set(_p, c->id, [self base:c->id] >= 0.5 ? 0 : 1); break;
    case C_COPY: case C_PASTE:
       _edited |= 1u << c->id;        /* so releasing the key does not count as a tap */
       if ([self padButtonEnabled:c]) {
-         if (c->kind == C_COPY) [self copyStep:c->id]; else [self pasteStep:c->id];
+         if (c->kind == C_COPY) [self copyStep:[self stepOf:c->id]]; else [self pasteStep:[self stepOf:c->id]];
          _flashCtl = i;
          _flashAt = CACurrentMediaTime();
       }
       break;
    case C_CLEAR: {
       const unsigned h = [self held];
-      for (int t = 0; t < UI_STEPS; ++t)
+      for (int t = 0; t < UI_PAGE; ++t)
          if (h >> t & 1)
-            for (int id = 0; id < UI_LOCKS; ++id) atomic_store_explicit(&_ui->lock[t][id], -1, memory_order_relaxed);
+            for (int id = 0; id < UI_LOCKS; ++id) atomic_store_explicit(&_ui->lock[[self stepOf:t]][id], -1, memory_order_relaxed);
       _edited |= h;
       mt_ui_pattern_changed(_p);
       break;
@@ -783,6 +856,11 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
       if (i >= 0 && _c[i].kind == C_TAB && _c[i].id != _tab) { _tab = _c[i].id; [self tick:nil]; }
       return;
    }
+   if (_dragCtl >= 0 && _c[_dragCtl].kind == C_LEN) {   /* 62 steps over 200 points, as a knob's range */
+      [self moveLength:(_dragLast.y - pt.y) * 62 / 200 * (e.modifierFlags & NSEventModifierFlagShift ? 0.1 : 1)];
+      _dragLast = pt;
+      return;
+   }
    if (_dragId < 0) return;
    const clap_param_info_t *info = &_info[_dragId];
    const double range = info->max_value - info->min_value, fine = e.modifierFlags & NSEventModifierFlagShift ? 0.1 : 1;
@@ -814,6 +892,13 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
    _dragGesture = NO;
    [self tick:nil];
 }
+/* LEN moves by whole steps; the fraction stays for the next move. */
+- (void)moveLength:(double)delta {
+   if (lround(_lenValue) != [self length]) _lenValue = [self length];   /* changed elsewhere since */
+   _lenValue = fmin(fmax(_lenValue + delta, 2), UI_STEPS);
+   if (lround(_lenValue) != [self length]) mt_ui_set_length(_p, (int)lround(_lenValue));
+   [self tick:nil];
+}
 - (void)scrollWheel:(NSEvent *)e {
    const NSTimeInterval now = CACurrentMediaTime();
    const BOOL wheel = e.phase == NSEventPhaseNone && e.momentumPhase == NSEventPhaseNone;
@@ -825,8 +910,12 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
       _scrollHeld = [self held];
    }
    [self checkHolds];
-   if (_scrollDead) return;
    const int i = [self hit:[self convertPoint:e.locationInWindow fromView:nil]];
+   if (i >= 0 && _c[i].kind == C_LEN) {
+      [self moveLength:e.scrollingDeltaY * (e.hasPreciseScrollingDeltas ? 1 : 8) * 62 / 400 * (e.modifierFlags & NSEventModifierFlagShift ? 0.1 : 1)];
+      return;
+   }
+   if (_scrollDead) return;
    if (i < 0 || (_c[i].kind != C_KNOB && _c[i].kind != C_SLIDER)) return;
    const int ident = [self paramOf:&_c[i]];
    if (mt_ui_unused(_p, ident)) return;

@@ -8,7 +8,8 @@
  *  - the notes: one voice, the last note held wins; releasing it returns to
  *    the previous note still held (a new trig), or ends the note. POLY runs six
  *    whole tracks from the firmware's voice allocator;
- *  - 16 trigs on the host's transport, with parameter locks;
+ *  - a pattern of up to 64 steps on the host's transport, with trigs and
+ *    parameter locks, and SCALE SETUP's length and speed;
  *  - a Cocoa editor (mono_track_gui.m);
  *  - every hardware data page as a page of Bitwig remote controls;
  *  - MIDI pitch bend, as KIT ASSIGN JOY R/L would send it (MIRR on, PAGE PTCH,
@@ -66,7 +67,7 @@ static const char *const features[] = {
    CLAP_PLUGIN_FEATURE_INSTRUMENT, CLAP_PLUGIN_FEATURE_SYNTHESIZER, CLAP_PLUGIN_FEATURE_STEREO, NULL
 };
 #define DESCRIPTOR(m) { .clap_version = CLAP_VERSION_INIT, .id = machines[m].id, .name = machines[m].name, \
-   .vendor = "Independent DSP", .url = "", .manual_url = "", .support_url = "", .version = "0.4.9", \
+   .vendor = "Independent DSP", .url = "", .manual_url = "", .support_url = "", .version = "0.5.0", \
    .description = "A whole Monomachine track: machine, EQ, filter, AMP, SRR, delay, LFOs, ported from its code", .features = features }
 static const clap_plugin_descriptor_t descriptors[MT_MACHINES] = {
    DESCRIPTOR(0), DESCRIPTOR(1), DESCRIPTOR(2), DESCRIPTOR(3), DESCRIPTOR(4), DESCRIPTOR(5), DESCRIPTOR(6), DESCRIPTOR(7),
@@ -195,7 +196,9 @@ typedef struct {
    double tempo, rate;
    MtAlloc alloc;
    bool poly_held[128];               /* POLY: pitches held through MIDI in (0x2bc018) */
-   int64_t seq_tick;                  /* the sixteenth the playhead is in */
+   int64_t seq_clock;                 /* the MIDI clock (24 a beat) the playhead is in, SEQ_STOPPED when stopped */
+   MtSeq seq;
+   int seq_step;                      /* the step the playhead is in */
    uint8_t lock_on[7];                /* parameters away from the kit (0x2bc7c0) */
    int8_t queue[MT_LOCKS];            /* the next frame's locks: a value, QUEUE_KIT or QUEUE_NONE */
    bool queued;
@@ -399,7 +402,7 @@ static void reset(Plugin *s) {
    s->blocks = 0;
    s->pos = 0;
    s->bend = 128;
-   s->seq_tick = SEQ_STOPPED;
+   s->seq_clock = SEQ_STOPPED;
    seq_clear(s);
    atomic_store_explicit(&s->ui.step, -1, memory_order_relaxed);
    rs_reset(&s->down);
@@ -458,9 +461,10 @@ static void note_off(Plugin *s, int key) {
    for (int i = 0; i < n; ++i) voice_off(s, &s->voice[freed[i]], key);
 }
 
-/* ---- the 16 trigs -------------------------------------------------------------- */
+/* ---- the pattern: up to 64 steps --------------------------------------------- */
 
-static int step_of(int64_t tick) { return (int)(((tick % MT_STEPS) + MT_STEPS) % MT_STEPS); }
+static int seq_length(const Plugin *s) { return atomic_load_explicit(&s->ui.length, memory_order_relaxed); }
+static int seq_speed(const Plugin *s) { return atomic_load_explicit(&s->ui.speed, memory_order_relaxed); }
 
 /* Queues what mt_step_locks found. only_returns: leave the step's own locks alone. */
 static void seq_apply(Plugin *s, int step, bool trig, bool only_returns) {
@@ -483,22 +487,32 @@ static void seq_step(Plugin *s, int step) {
    const bool trig = atomic_load_explicit(&s->ui.trig, memory_order_relaxed) >> step & 1;
    seq_apply(s, step, trig, false);
    if (trig) voice_trig(&s->voice[0], PEND_FILT | PEND_LFO);
+   s->seq_step = step;
    atomic_store_explicit(&s->ui.step, step, memory_order_relaxed);
 }
-/* pos, frame: the playhead and one sample, in sixteenths. */
+/* pos, frame: the playhead and one sample, in MIDI clocks. Each clock it enters runs
+ * the firmware's clock routine (mt_seq_clock). A start or a jump puts it where the
+ * pattern would be had it played from the start of the song at its present length
+ * and speed; it then waits for the next step to begin. */
 static void seq_advance(Plugin *s, double pos, double frame) {
    pos += SEQ_LEAD * frame;
-   const int64_t tick = (int64_t)floor(pos);
-   if (tick == s->seq_tick) return;
-   if (tick == s->seq_tick - 1 && (double)s->seq_tick - pos < SEQ_SLACK * frame) return;
-   s->seq_tick = tick;
-   seq_step(s, step_of(tick));
+   const int64_t c = (int64_t)floor(pos);
+   const bool running = s->seq_clock != SEQ_STOPPED;
+   if (running && c == s->seq_clock) return;
+   if (running && c == s->seq_clock - 1 && (double)s->seq_clock - pos < SEQ_SLACK * frame) return;
+   if (!running || c != s->seq_clock + 1) {
+      mt_seq_at(&s->seq, c, seq_length(s), seq_speed(s));
+      s->seq_step = s->seq.step;
+   }
+   s->seq_clock = c;
+   const int step = mt_seq_clock(&s->seq, seq_length(s), seq_speed(s));
+   if (step >= 0) seq_step(s, step);
 }
 /* A MIDI note on the running pattern: shown under its step, and by default it ends
  * every lock except the ones its own step holds. */
 static void seq_note(Plugin *s) {
-   if (s->seq_tick == SEQ_STOPPED) return;
-   const int step = step_of(s->seq_tick);
+   if (s->seq_clock == SEQ_STOPPED) return;
+   const int step = s->seq_step;
    atomic_fetch_add_explicit(&s->ui.notes[step], 1, memory_order_relaxed);
    if (value(s, P_LOCK_END) >= 0.5) seq_apply(s, step, true, true);
 }
@@ -511,7 +525,7 @@ static void seq_stop(Plugin *s) {
          atomic_store_explicit(&s->ui.active[id], -1, memory_order_relaxed);
       }
    memset(s->lock_on, 0, sizeof s->lock_on);
-   s->seq_tick = SEQ_STOPPED;
+   s->seq_clock = SEQ_STOPPED;
    atomic_store_explicit(&s->ui.step, -1, memory_order_relaxed);
 }
 
@@ -631,17 +645,19 @@ static clap_process_status plug_process(const clap_plugin_t *p, const clap_proce
    clap_audio_buffer_t *out = &pr->audio_outputs[0];
    if (out->channel_count < 2 || (!out->data32 && !out->data64)) return CLAP_PROCESS_ERROR;
    s->tempo = pr->transport && (pr->transport->flags & CLAP_TRANSPORT_HAS_TEMPO) && isfinite(pr->transport->tempo) ? pr->transport->tempo : 120.0;
-   if (atomic_exchange_explicit(&s->pattern_loaded, false, memory_order_relaxed)) seq_clear(s);
+   if (atomic_exchange_explicit(&s->pattern_loaded, false, memory_order_relaxed)) {
+      seq_clear(s);
+      s->seq_clock = SEQ_STOPPED;   /* a new pattern: placed again at the next sample, as at a start */
+   }
    const clap_event_transport_t *tr = pr->transport;
    const bool playing = tr && (tr->flags & CLAP_TRANSPORT_IS_PLAYING) && (tr->flags & CLAP_TRANSPORT_HAS_BEATS_TIMELINE);
    const double beat = playing ? (double)tr->song_pos_beats / (double)CLAP_BEATTIME_FACTOR : 0.0, per_frame = s->tempo / (60.0 * s->rate);
-   if (!playing && s->seq_tick != SEQ_STOPPED) seq_stop(s);
-   if (playing && s->seq_tick == SEQ_STOPPED) s->seq_tick = (int64_t)floor((beat - per_frame) * 4.0);   /* so a start exactly on a step plays it */
+   if (!playing && s->seq_clock != SEQ_STOPPED) seq_stop(s);
    const clap_input_events_t *ev = pr->in_events;
    const uint32_t count = ev && ev->size && ev->get ? ev->size(ev) : 0;
    uint32_t next = 0;
    for (uint32_t n = 0; n < pr->frames_count; ++n) {
-      if (playing) seq_advance(s, (beat + n * per_frame) * 4.0, per_frame * 4.0);   /* before the events: a step's locks precede its notes */
+      if (playing) seq_advance(s, (beat + n * per_frame) * 24.0, per_frame * 24.0);   /* before the events: a step's locks precede its notes */
       for (; next < count; ++next) {
          const clap_event_header_t *h = ev->get(ev, next);
          if (h && h->time > n) break;
@@ -876,25 +892,28 @@ static void params_flush(const clap_plugin_t *p, const clap_input_events_t *in, 
 }
 static const clap_plugin_params_t params = {params_count, params_info, params_get, params_to_text, params_from_text, params_flush};
 
-/* Version 1 (0.1.0) held the first 61 parameters; version 2 (0.2.0) 65, then the
- * pattern: the trig mask and every step's locks; version 3 adds NOTE ENDS LOCK. */
+/* Version 1 (0.1.0) held the first 61 parameters; version 2 (0.2.0) 65, then a
+ * 16-step pattern: the trig mask and every step's locks; version 3 adds NOTE ENDS
+ * LOCK. Version 4 (0.5.0) holds 64 steps: the trig mask (8 bytes), length, speed
+ * and every step's locks. */
 #define STATE_V1 (8 + 8 * 61)
-#define STATE_WITH(n) (8 + 8 * (n) + 2 + MT_STEPS * MT_LOCKS)
-#define STATE_V3 STATE_WITH(NPARAM)
+#define STATE_16(n) (8 + 8 * (n) + 2 + 16 * MT_LOCKS)
+#define STATE_V4 (8 + 8 * NPARAM + 10 + MT_STEPS * MT_LOCKS)
 static bool state_save(const clap_plugin_t *p, const clap_ostream_t *st) {
    const Plugin *s = p->plugin_data;
-   uint8_t buf[STATE_V3] = {0};
+   uint8_t buf[STATE_V4] = {0};
    memcpy(buf, machines[s->machine].magic, 4);
-   buf[7] = 3;
+   buf[7] = 4;
    for (int i = 0; i < NPARAM; ++i)
       for (int b = 0; b < 8; ++b) buf[8 + 8 * i + b] = (uint8_t)(to_bits(value(s, i)) >> (8 * b));
    uint8_t *pat = buf + 8 + 8 * NPARAM;
-   const unsigned trig = atomic_load_explicit(&s->ui.trig, memory_order_relaxed);
-   pat[0] = (uint8_t)trig;
-   pat[1] = (uint8_t)(trig >> 8);
+   const uint64_t trig = atomic_load_explicit(&s->ui.trig, memory_order_relaxed);
+   for (int b = 0; b < 8; ++b) pat[b] = (uint8_t)(trig >> (8 * b));
+   pat[8] = (uint8_t)seq_length(s);
+   pat[9] = (uint8_t)seq_speed(s);
    for (int t = 0; t < MT_STEPS; ++t)
       for (int i = 0; i < MT_LOCKS; ++i)
-         pat[2 + t * MT_LOCKS + i] = (uint8_t)atomic_load_explicit(&s->ui.lock[t][i], memory_order_relaxed);
+         pat[10 + t * MT_LOCKS + i] = (uint8_t)atomic_load_explicit(&s->ui.lock[t][i], memory_order_relaxed);
    for (uint64_t done = 0; done < sizeof buf;) {
       const int64_t n = st && st->write ? st->write(st, buf + done, sizeof buf - done) : -1;
       if (n <= 0) return false;
@@ -904,7 +923,7 @@ static bool state_save(const clap_plugin_t *p, const clap_ostream_t *st) {
 }
 static bool state_load(const clap_plugin_t *p, const clap_istream_t *st) {
    Plugin *s = p->plugin_data;
-   uint8_t buf[STATE_V3];
+   uint8_t buf[STATE_V4];
    uint64_t got = 0;
    while (got < sizeof buf) {
       const int64_t n = st && st->read ? st->read(st, buf + got, sizeof buf - got) : -1;
@@ -913,9 +932,10 @@ static bool state_load(const clap_plugin_t *p, const clap_istream_t *st) {
       got += (uint64_t)n;
    }
    if (got < 8 || memcmp(buf, machines[s->machine].magic, 4) || buf[4] || buf[5] || buf[6]) return false;
-   if (buf[7] < 1 || buf[7] > 3) return false;
-   const int count = buf[7] == 1 ? 61 : buf[7] == 2 ? 65 : NPARAM;
-   if (got != (buf[7] == 1 ? (uint64_t)STATE_V1 : (uint64_t)STATE_WITH(count))) return false;
+   const int version = buf[7];
+   if (version < 1 || version > 4) return false;
+   const int count = version == 1 ? 61 : version == 2 ? 65 : NPARAM;
+   if (got != (uint64_t)(version == 1 ? STATE_V1 : version < 4 ? STATE_16(count) : STATE_V4)) return false;
    double v[NPARAM];
    for (int i = 0; i < NPARAM; ++i) {
       if (i >= count) { v[i] = def_of(s->machine, i); continue; }
@@ -924,18 +944,28 @@ static bool state_load(const clap_plugin_t *p, const clap_istream_t *st) {
       v[i] = bits_to(u);
       if (!isfinite(v[i]) || v[i] < lo_of(i) || v[i] > hi_of(i)) return false;
    }
-   const uint8_t *pat = buf[7] >= 2 ? buf + 8 + 8 * count : NULL;
-   if (pat)
-      for (int t = 0; t < MT_STEPS; ++t)
+   /* the pattern; 16 steps before version 4, at length 16 and 1X */
+   const uint8_t *pat = version >= 2 ? buf + 8 + 8 * count : NULL;
+   const int steps = version >= 4 ? MT_STEPS : 16, head = version >= 4 ? 10 : 2;
+   uint64_t trig = 0;
+   int length = 16, speed = 0;
+   if (pat) {
+      for (int b = 0; b < steps / 8; ++b) trig |= (uint64_t)pat[b] << (8 * b);
+      if (version >= 4) { length = pat[8]; speed = pat[9]; }
+      if (length < 2 || length > MT_STEPS || speed > 3) return false;
+      for (int t = 0; t < steps; ++t)
          for (int i = 0; i < MT_LOCKS; ++i) {
-            const int x = (int8_t)pat[2 + t * MT_LOCKS + i];
+            const int x = (int8_t)pat[head + t * MT_LOCKS + i];
             if (x < -1 || x > hi_of(i)) return false;
          }
+   }
    for (int i = 0; i < NPARAM; ++i) set_value(s, i, v[i]);
-   atomic_store_explicit(&s->ui.trig, pat ? (uint16_t)(pat[0] | pat[1] << 8) : 0, memory_order_relaxed);
+   atomic_store_explicit(&s->ui.trig, trig, memory_order_relaxed);
+   atomic_store_explicit(&s->ui.length, (int8_t)length, memory_order_relaxed);
+   atomic_store_explicit(&s->ui.speed, (int8_t)speed, memory_order_relaxed);
    for (int t = 0; t < MT_STEPS; ++t)
       for (int i = 0; i < MT_LOCKS; ++i)
-         atomic_store_explicit(&s->ui.lock[t][i], pat ? (int8_t)pat[2 + t * MT_LOCKS + i] : -1, memory_order_relaxed);
+         atomic_store_explicit(&s->ui.lock[t][i], pat && t < steps ? (int8_t)pat[head + t * MT_LOCKS + i] : -1, memory_order_relaxed);
    atomic_store_explicit(&s->pattern_loaded, true, memory_order_relaxed);
    const clap_host_params_t *hp = s->host->get_extension ? s->host->get_extension(s->host, CLAP_EXT_PARAMS) : NULL;
    if (hp && hp->rescan) hp->rescan(s->host, CLAP_PARAM_RESCAN_VALUES | CLAP_PARAM_RESCAN_TEXT);
@@ -1026,6 +1056,35 @@ void mt_ui_pattern_changed(const clap_plugin_t *p) {
    const clap_host_state_t *hs = s->host->get_extension ? s->host->get_extension(s->host, CLAP_EXT_STATE) : NULL;
    if (hs && hs->mark_dirty) hs->mark_dirty(s->host);
 }
+/* SCALE SETUP's length, moved one step at a time as the unit's arrow keys move it, so
+ * each page it reaches is filled as the unit fills it (mt_grow_page). The playhead
+ * takes a new length when the pattern next wraps. */
+static bool page_empty(const Plugin *s, int page) {
+   if (atomic_load_explicit(&s->ui.trig, memory_order_relaxed) >> (16 * page) & 0xffff) return false;
+   for (int t = 16 * page; t < 16 * page + 16; ++t)
+      for (int i = 0; i < MT_LOCKS; ++i)
+         if (atomic_load_explicit(&s->ui.lock[t][i], memory_order_relaxed) >= 0) return false;
+   return true;
+}
+void mt_ui_set_length(const clap_plugin_t *p, int length) {
+   Plugin *s = p->plugin_data;
+   length = length < 2 ? 2 : length > MT_STEPS ? MT_STEPS : length;
+   for (int old = seq_length(s); old != length;) {
+      const int to = old + (length > old ? 1 : -1);
+      int src;
+      const int dst = mt_grow_page(old, to, &src);
+      if (dst >= 0 && page_empty(s, dst)) {   /* 0x23cb3a: the trigs are ORed in, the locks copied */
+         const uint64_t trig = atomic_load_explicit(&s->ui.trig, memory_order_relaxed);
+         atomic_fetch_or_explicit(&s->ui.trig, (trig >> (16 * src) & 0xffff) << (16 * dst), memory_order_relaxed);
+         for (int t = 0; t < 16; ++t)
+            for (int i = 0; i < MT_LOCKS; ++i)
+               atomic_store_explicit(&s->ui.lock[16 * dst + t][i], atomic_load_explicit(&s->ui.lock[16 * src + t][i], memory_order_relaxed), memory_order_relaxed);
+      }
+      atomic_store_explicit(&s->ui.length, (int8_t)to, memory_order_relaxed);
+      old = to;
+   }
+   mt_ui_pattern_changed(p);
+}
 int mt_ui_bipolar(const clap_plugin_t *p, int id) { return bipolar(((const Plugin *)p->plugin_data)->machine, id); }
 int mt_ui_unused(const clap_plugin_t *p, int id) { return hidden(((const Plugin *)p->plugin_data)->machine, id); }
 
@@ -1104,6 +1163,8 @@ static const clap_plugin_t *factory_create(const clap_plugin_factory_t *f, const
    atomic_init(&s->text_dirty, false);
    atomic_init(&s->pattern_loaded, false);
    atomic_init(&s->ui.trig, 0);
+   atomic_init(&s->ui.length, 16);
+   atomic_init(&s->ui.speed, 0);
    atomic_init(&s->ui.step, -1);
    for (int l = 0; l < 3; ++l) {
       atomic_init(&s->ui.lfo_pos[l], 0);

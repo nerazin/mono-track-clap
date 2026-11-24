@@ -13,7 +13,7 @@
 enum { L_PAGE, L_DEST, L_TRIG, L_WAVE, L_MULT, L_SPD, L_INTL, L_DPTH };
 enum { MT_FREE, MT_TRIG, MT_HOLD, MT_ONE, MT_HALF };
 enum { MT_KNOBS = 32 };   /* SYN, AMP, FILT, EFX */
-enum { MT_VOICES = 6, MT_STEPS = 16, MT_LOCKS = 56 };   /* lockable: SYN AMP FILT EFX LFO1-3, eight each */
+enum { MT_VOICES = 6, MT_STEPS = 64, MT_LOCKS = 56 };   /* lockable: SYN AMP FILT EFX LFO1-3, eight each */
 
 typedef struct {
    int32_t pos, out, hold, inc, rem, gate, count;
@@ -226,6 +226,62 @@ static void mt_host_frame(MtHost *h, const int32_t *mod) {
       h->block[W_LEVEL] = h->word[W_LEVEL];
    }
    if ((f & 7) == 0) mt_lfo_step(h, 24, tick);
+}
+
+/* ---- the pattern's length and speed (SCALE SETUP) -------------------------------
+ * A pattern is 2-64 steps, in pages of 16 (length: pattern byte 0x424). Its speed
+ * (0x425) is 1X, 2X, 3/4X or 3/2X: 6, 3, 8 or 4 MIDI clocks a step (0x257e94). */
+static const int mt_clocks[4] = {6, 3, 8, 4};
+
+/* The playhead as the sequencer's clock routine 0x23901e moves it, one MIDI clock at
+ * a time (24 a beat; swing is not modelled). A step's routines run from a timer the
+ * step sets to its own length, while the step counter runs on its own: it reads the
+ * speed again at each step, and on the loop's first step at every clock. A speed
+ * changed during that step therefore moves the counter at once but not the timer:
+ * step 1 can run twice, or step 2 be skipped or run late. A new length waits for
+ * the wrap. */
+typedef struct {
+   int step;    /* 0x2bc284 */
+   int clock;   /* clocks into the step, 0x2bc29c */
+   int speed;   /* the speed in use, 0x2bc2a8 */
+   int end;     /* the length in use, 0x2bda3e */
+   int wait;    /* clocks until the step routines run (0x2bc26c, in clocks) */
+} MtSeq;
+
+/* The playhead just before clock c, as if length and speed had been the same since clock 0. */
+static void mt_seq_at(MtSeq *q, int64_t c, int length, int speed) {
+   const int n = mt_clocks[speed];
+   int64_t steps = c / n;
+   if (steps * n > c) --steps;
+   q->clock = (int)(c - steps * n);
+   q->step = (int)(((steps % length) + length) % length);
+   q->speed = speed;
+   q->end = length;
+   q->wait = q->clock ? n - q->clock : 0;
+}
+/* One clock; length and speed are the pattern's now. Returns the step whose routines run, or -1. */
+static int mt_seq_clock(MtSeq *q, int length, int speed) {
+   const int run = q->wait < 1 ? q->step : -1;
+   if (++q->clock >= mt_clocks[q->speed]) {
+      q->clock = 0;
+      q->speed = speed;
+      if (++q->step >= q->end) { q->step = 0; q->end = length; }
+   }
+   const int n = mt_clocks[q->speed];
+   if (q->step == 0) q->speed = speed;
+   if (run >= 0) q->wait = n;
+   q->wait--;
+   return run;
+}
+
+/* Setting the length (0x23d004) to one that reaches a new page fills that page from a
+ * lower one when the old length did not reach it and it is empty: page 2 from 1, 3 from
+ * 1, 4 from 2 (0-based here). Returns the page to fill and *src the one to copy, or -1. */
+static int mt_grow_page(int old, int length, int *src) {
+   if (length > 48) { *src = 1; return old <= 48 ? 3 : -1; }
+   if (length > 32) { *src = 0; return old <= 32 ? 2 : -1; }
+   if (length > 16) { *src = 0; return old <= 16 ? 1 : -1; }
+   return -1;
 }
 
 /* ---- parameter locks ----------------------------------------------------------

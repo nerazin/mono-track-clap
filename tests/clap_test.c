@@ -9,12 +9,15 @@
  *  - an LFO on page FILT moves the sound, and a second LFO aimed at the first
  *    one's DPTH changes that movement
  *  - LFO list knobs show their entries, and DEST names follow PAGE
- *  - state round trip, rejected bad states, parameter text round trip, 0.1.0 states
+ *  - state round trip, rejected bad states, parameter text round trip, states of
+ *    0.1.0, 0.2.0 and 0.4 (16 steps)
  *  - POLY: one note equals mono, a chord is the sum of its notes, a seventh steals
  *  - the MIDI TRIG switches
  *  - trigs play no note: they restart the filter envelope and LFOs and end locks
  *  - locks, trigless locks, MIDI notes ending locks (and the switch), stop
- *  - a host position that rounds backward does not play a step twice */
+ *  - a host position that rounds backward does not play a step twice
+ *  - 64 steps: a step past the length never plays; a short length wraps; the four
+ *    speeds; a start in the middle of the song finds its step at that length */
 #include <clap/clap.h>
 #include <dlfcn.h>
 #include <math.h>
@@ -25,7 +28,8 @@
 
 #define CHECK(c, ...) do { if (!(c)) { printf("FAIL line %d: ", __LINE__); printf(__VA_ARGS__); puts(""); exit(1); } } while (0)
 #define NPARAM 66
-#define STATE_SIZE (8 + 8 * NPARAM + 2 + 16 * 56)
+#define PAT (8 + 8 * NPARAM)
+#define STATE_SIZE (PAT + 10 + 64 * 56)
 #define N 88200
 enum { SYN = 0, AMP = 8, FILT = 16, EFX = 24, LFO = 32, LEVEL = 56, LPKEY, HPKEY, BEND, MTUNE, POLY, TRIG_SYN, TRIG_FILT, TRIG_LFO, LOCK_END };
 static const char *const ids[8] = {"sin", "nois", "saw", "puls", "ens", "fmstat", "fmpar", "fmdyn"};
@@ -39,7 +43,7 @@ static void host_cb(const clap_host_t *h) { (void)h; }
 static const clap_host_t host = {CLAP_VERSION_INIT, NULL, "test", "", "", "1", host_ext, host_cb, host_cb, host_cb};
 static const clap_plugin_factory_t *factory;
 
-typedef struct { uint8_t data[4096]; uint64_t size, pos; } Buffer;
+typedef struct { uint8_t data[8192]; uint64_t size, pos; } Buffer;
 static int64_t buf_write(const clap_ostream_t *s, const void *p, uint64_t n) { Buffer *b = s->ctx; if (b->size + n > sizeof b->data) return -1; memcpy(b->data + b->size, p, n); b->size += n; return (int64_t)n; }
 static int64_t buf_read(const clap_istream_t *s, void *p, uint64_t n) { Buffer *b = s->ctx; if (n > b->size - b->pos) n = b->size - b->pos; memcpy(p, b->data + b->pos, n); b->pos += n; return (int64_t)n; }
 
@@ -108,7 +112,7 @@ static double wobble(const float *x, int a, int b) {
 
 typedef struct { int at, key, on; } Sched;
 typedef struct { int step, id, v; } LockAt;
-typedef struct { unsigned trig; LockAt lock[4]; int nlock, stop_at, wobble; double bpm; } Pattern;
+typedef struct { uint64_t trig; LockAt lock[4]; int nlock, stop_at, wobble; double bpm; int length, speed; double start; } Pattern;
 
 /* Runs a schedule of notes, with an optional pattern on a playing transport from beat 0. */
 static void schedule(int m, const Set *set, int nset, const Sched *notes, int nnotes, const Pattern *pat, float *l, float *r, int frames) {
@@ -120,9 +124,11 @@ static void schedule(int m, const Set *set, int nset, const Sched *notes, int nn
       clap_istream_t is = {&b, buf_read};
       const clap_plugin_state_t *st = p->get_extension(p, CLAP_EXT_STATE);
       CHECK(st->save(p, &os) && b.size == STATE_SIZE, "save");
-      uint8_t *q = b.data + 8 + 8 * NPARAM;
-      q[0] = (uint8_t)pat->trig; q[1] = (uint8_t)(pat->trig >> 8);
-      for (int i = 0; i < pat->nlock; ++i) q[2 + pat->lock[i].step * 56 + pat->lock[i].id] = (uint8_t)pat->lock[i].v;
+      uint8_t *q = b.data + PAT;
+      for (int i = 0; i < 8; ++i) q[i] = (uint8_t)(pat->trig >> (8 * i));
+      q[8] = (uint8_t)(pat->length ? pat->length : 16);
+      q[9] = (uint8_t)pat->speed;
+      for (int i = 0; i < pat->nlock; ++i) q[10 + pat->lock[i].step * 56 + pat->lock[i].id] = (uint8_t)pat->lock[i].v;
       CHECK(st->load(p, &is), "load pattern");
    }
    CHECK(p->activate(p, 44100, 1, 512) && p->start_processing(p), "activate");
@@ -142,7 +148,7 @@ static void schedule(int m, const Set *set, int nset, const Sched *notes, int nn
          tr.flags |= CLAP_TRANSPORT_IS_PLAYING | CLAP_TRANSPORT_HAS_BEATS_TIMELINE;
          /* wobble: each block's position off by +/- that many samples, as a host's rounding can leave it */
          const double shifted = at + (pat->wobble ? (at / 256 & 1 ? -pat->wobble : pat->wobble) : 0);
-         tr.song_pos_beats = (clap_beattime)llround(shifted * (tr.tempo / 60.0 / 44100.0) * CLAP_BEATTIME_FACTOR);
+         tr.song_pos_beats = (clap_beattime)llround((pat->start + shifted * (tr.tempo / 60.0 / 44100.0)) * CLAP_BEATTIME_FACTOR);
       }
       float *data[2] = {l + at, r + at};
       clap_audio_buffer_t out;
@@ -312,32 +318,47 @@ int main(int argc, char **argv) {
          pq->get_value(q, POLY, &x); CHECK(x == 0, "POLY default");
          for (int i = TRIG_SYN; i <= TRIG_LFO; ++i) { pq->get_value(q, (clap_id)i, &x); CHECK(x == 1, "MIDI TRIG default"); }
          CHECK(sq->save(q, &oc), "save");
-         CHECK(!c.data[8 + 8 * NPARAM] && !c.data[9 + 8 * NPARAM], "no trigs");
-         for (int i = 0; i < 16 * 56; ++i) CHECK(c.data[10 + 8 * NPARAM + i] == 0xff, "no locks");
+         for (int i = 0; i < 8; ++i) CHECK(!c.data[PAT + i], "no trigs");
+         CHECK(c.data[PAT + 8] == 16 && c.data[PAT + 9] == 0, "16 steps at 1X");
+         for (int i = 0; i < 64 * 56; ++i) CHECK(c.data[PAT + 10 + i] == 0xff, "no locks");
          pq->get_value(q, LOCK_END, &x); CHECK(x == 1, "NOTE ENDS default");
          a.pos = 0; a.size = 8 + 8 * 61 - 1;
          CHECK(!sq->load(q, &ia), "a short state");
-         /* a state saved by 0.2.0: 65 parameters, then the pattern */
-         {
-            Buffer v2 = {{0}, 0, 0}, back = {{0}, 0, 0};
-            clap_ostream_t ov = {&v2, buf_write}, ob = {&back, buf_write};
-            clap_istream_t iv = {&v2, buf_read};
+         /* states saved by 0.2.0 (65 parameters) and 0.3/0.4 (66): a 16-step pattern, two trig bytes */
+         for (int version = 2; version <= 3; ++version) {
+            const int count = version == 2 ? 65 : NPARAM;
+            Buffer old = {{0}, 0, 0}, back = {{0}, 0, 0};
+            clap_ostream_t ov = {&old, buf_write}, ob = {&back, buf_write};
+            clap_istream_t iv = {&old, buf_read};
             CHECK(st->save(p, &ov), "save");
-            uint8_t *pat = v2.data + 8 + 8 * NPARAM;
+            uint8_t *pat = old.data + 8 + 8 * count;
+            memset(pat, 0xff, 2 + 16 * 56);
             pat[0] = 0x21; pat[1] = 0x80;
             pat[2 + 7 * 56 + AMP + 5] = 33;
-            memmove(v2.data + 8 + 8 * 65, pat, 2 + 16 * 56);
-            v2.data[7] = 2;
-            v2.size = 8 + 8 * 65 + 2 + 16 * 56;
-            CHECK(sq->load(q, &iv), "load a 0.2.0 state");
-            pq->get_value(q, LOCK_END, &x); CHECK(x == 1, "0.2.0: NOTE ENDS default");
+            old.data[7] = (uint8_t)version;
+            old.size = 8 + 8 * count + 2 + 16 * 56;
+            CHECK(sq->load(q, &iv), "load a version %d state", version);
+            pq->get_value(q, LOCK_END, &x); CHECK(version == 3 || x == 1, "0.2.0: NOTE ENDS default");
             CHECK(sq->save(q, &ob), "save");
-            const uint8_t *r2 = back.data + 8 + 8 * NPARAM;
-            CHECK(r2[0] == 0x21 && r2[1] == 0x80 && r2[2 + 7 * 56 + AMP + 5] == 33, "0.2.0 pattern");
+            const uint8_t *r2 = back.data + PAT;
+            CHECK(r2[0] == 0x21 && r2[1] == 0x80 && !r2[2] && r2[8] == 16 && r2[9] == 0, "version %d pattern head", version);
+            CHECK(r2[10 + 7 * 56 + AMP + 5] == 33 && (int8_t)r2[10 + 16 * 56 + AMP + 5] == -1, "version %d locks", version);
+            old.pos = 0; old.size--;
+            CHECK(!sq->load(q, &iv), "a short version %d state", version);
          }
-         /* a lock out of range */
-         a.pos = 0; a.size = c.size; memcpy(a.data, c.data, c.size); a.data[10 + 8 * NPARAM + LFO] = 100;   /* LFO PAGE has 9 entries */
+         /* a lock out of range, a length or speed out of range */
+         a.pos = 0; a.size = c.size; memcpy(a.data, c.data, c.size); a.data[PAT + 10 + LFO] = 100;   /* LFO PAGE has 9 entries */
          CHECK(!sq->load(q, &ia), "lock out of range");
+         const int bad[4][2] = {{8, 1}, {8, 65}, {9, 4}, {9, 0xff}};
+         for (int i = 0; i < 4; ++i) {
+            a.pos = 0; memcpy(a.data, c.data, c.size); a.data[PAT + bad[i][0]] = (uint8_t)bad[i][1];
+            CHECK(!sq->load(q, &ia), "pattern byte %d = %d", bad[i][0], bad[i][1]);
+         }
+         a.pos = 0; memcpy(a.data, c.data, c.size); a.data[PAT + 8] = 64; a.data[PAT + 9] = 3; a.data[PAT + 7] = 0x80; a.data[PAT + 10 + 63 * 56 + AMP] = 5;
+         CHECK(sq->load(q, &ia), "a 64-step pattern at 3/2X");
+         Buffer d = {{0}, 0, 0};
+         clap_ostream_t od = {&d, buf_write};
+         CHECK(sq->save(q, &od) && !memcmp(d.data + PAT, a.data + PAT, 10 + 64 * 56), "64 steps round trip");
       }
       q->destroy(q);
       p->destroy(p);
@@ -548,6 +569,47 @@ int main(int argc, char **argv) {
       schedule(2, hold, 3, key, 1, &pt, l, r, N);
       CHECK(rms(l, 800, 3 * S - 200) > 1e-4, "sounds before stop");
       CHECK(rms(l, 3 * S + 800, N) > 2 * rms(l, 800, 3 * S - 200), "stop must return VOL to the kit and keep the note");
+
+      /* 64 steps: from beat 9.75 the playhead is on step 39, so a lock on step 40 plays a step later;
+       * at the default 16 steps that step is past the end and never plays */
+      for (int len = 16; len <= 64; len += 48) {
+         pt = (Pattern){0, {{40, AMP + 5, 0}}, 1};
+         pt.length = len;
+         pt.start = 39 / 4.0;
+         schedule(2, hold, 3, key, 1, &pt, l, r, N);
+         if (len == 64) CHECK(rms(l, S + 800, N) < 1e-5, "step 40 of 64: %g", rms(l, S + 800, N));
+         else CHECK(rms(l, S + 800, N) > 1e-3, "step 40 of 16 must not play");
+      }
+      /* a short length wraps: six steps, the lock on step 0 comes back at the seventh sixteenth */
+      for (int len = 6; len <= 16; len += 10) {
+         pt = (Pattern){1 | 1 << 4, {{0, AMP + 5, 0}}, 1};
+         pt.length = len;
+         schedule(2, hold, 3, key, 1, &pt, l, r, N);
+         CHECK(rms(l, 4 * S + 800, 6 * S - 200) > 1e-3, "kit VOL after the trig on step 4");
+         if (len == 6) CHECK(rms(l, 6 * S + 800, 10 * S - 200) < 1e-5, "length 6 wraps to the lock: %g", rms(l, 6 * S + 800, 10 * S - 200));
+         else CHECK(rms(l, 6 * S + 800, 10 * S - 200) > 1e-3, "length 16 does not wrap yet");
+      }
+      /* the speeds: 6, 3, 8 or 4 MIDI clocks a step. A lock on step k plays k * clocks / 6 sixteenths in. */
+      {
+         const int clocks[4] = {6, 3, 8, 4}, k[4] = {8, 8, 6, 12};
+         for (int sp = 0; sp < 4; ++sp) {
+            const int t = (int)ceil(k[sp] * clocks[sp] / 6.0 * 5512.5);
+            pt = (Pattern){0, {{k[sp], AMP + 5, 0}}, 1};
+            pt.speed = sp;
+            schedule(2, hold, 3, key, 1, &pt, l, r, N);
+            CHECK(rms(l, t - 2 * S + 400, t - 400) > 1e-3, "speed %d: before step %d", sp, k[sp]);
+            CHECK(rms(l, t + 800, t + 2 * S) < 1e-5, "speed %d: step %d at %d", sp, k[sp], t);
+         }
+      }
+      /* a start in the middle of the song: at beat 6 a 12-step pattern is on its step 0, a 16-step one on step 8 */
+      for (int len = 12; len <= 16; len += 4) {
+         pt = (Pattern){0, {{2, AMP + 5, 0}}, 1};
+         pt.length = len;
+         pt.start = 6;
+         schedule(2, hold, 3, key, 1, &pt, l, r, N);
+         if (len == 12) CHECK(rms(l, 2 * S + 800, 4 * S) < 1e-5, "12 steps from beat 6: step 2 at the third sixteenth");
+         else CHECK(rms(l, 2 * S + 800, 4 * S) > 1e-3 && rms(l, 10 * S + 800, 12 * S) < 1e-5, "16 steps from beat 6: step 2 at the eleventh");
+      }
 
       /* POLY: locks reach every voice (the chord's VOL goes to 0) */
       {

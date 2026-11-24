@@ -28,12 +28,13 @@ The bundle `Mono Track.clap` holds:
 | Mono Track FM+ DYN | FM+ DYN |
 
 Each is monophonic, as a Monomachine track is, until POLY is on. Each has an
-editor window with 16 trigs and parameter locks.
+editor window with a pattern of up to 64 steps, with trigs and parameter locks.
 
 ## The editor
 
 The top row is the unit's data pages: SYN, AMP, FILT, EFX and LFO1-3. The right
-column holds the track's settings, and the bottom row the 16 trigs. Pressing an
+column holds the track's settings, and the bottom row 16 trigs: one page of the
+pattern. Pressing an
 LFO tab and sliding across the others switches to each one under the pointer.
 
 Each LFO tab shows its LFO: the wave it plays over one cycle, on a zero line,
@@ -46,9 +47,9 @@ holds still. With DPTH at 0 the graph is dimmed.
 On a knob, the needle is the stored value. An amber arc goes to a lock sounding
 now, and a violet arc shows what the host's modulation adds.
 
-**Trigs** run on the host's transport, one per sixteenth note, and follow its
-position. Notes come only from MIDI: a trig plays no note. It restarts the filter
-envelope and the LFOs, and ends locks.
+**Trigs** run on the host's transport, one per sixteenth note at 1X, and follow
+its position. Notes come only from MIDI: a trig plays no note. It restarts the
+filter envelope and the LFOs, and ends locks.
 
 | Do this | To get this |
 |---|---|
@@ -60,7 +61,24 @@ envelope and the LFOs, and ends locks.
 | **CPY** / **PST** under a selected trig | Copy the step's trig and all its locks, or replace this step with the copy. A trig is selected by a right-click latch or a held key. PST is gray until something is copied, and CPY is gray on an empty step. The copy lasts while the plug-in is loaded and is not saved with the project. |
 | **CLR LOCKS** | Remove all locks from the held steps |
 | **NOTE ENDS** (on by default) | A MIDI note ends the locks of earlier steps. Off, only a trig or Stop ends them, as on the unit. |
-| **KEYBOARD** on (off by default) | `12345678` and `QWERTYUI` act as the 16 trigs: tap to toggle, hold to edit. They follow the key's position, so any keyboard layout works. Other keys stay with the host. |
+| **KEYBOARD** on (off by default) | `12345678` and `QWERTYUI` act as the 16 trigs of the page shown: tap to toggle, hold to edit. They follow the key's position, so any keyboard layout works. Other keys stay with the host. |
+
+**SCALE** sets up the pattern, as the unit's SCALE key and SCALE SETUP window do.
+A pattern has 2 to 64 steps in pages of 16, and the pads show one page.
+
+| Do this | To get this |
+|---|---|
+| Drag or scroll **LEN** | Set the length, 2 to 64 steps. Shift for fine. Double-click for 16. |
+| Click the speed (**1X**) | Cycle 1X, 2X, 3/4X and 3/2X. A step is then a sixteenth, a thirty-second, an eighth-note triplet or a sixteenth-note triplet. |
+| Click page **1** to **4** | Show that page on the pads. A page past the end extends the pattern to the end of that page, as the unit's SCALE setting does. |
+
+When the pattern grows onto a page that holds nothing, that page is filled from a
+lower one, as on the unit: page 2 from page 1, page 3 from page 1, page 4 from
+page 2. A page that holds anything is kept. Steps past the end are dimmed, and
+they stay in the pattern when it gets shorter. While the playhead is on a page,
+that page's button is outlined white, with a tick where the playhead is. If the
+pattern gets shorter than the page shown, the pads go back to page 1, as the
+unit's do. Showing another page lets go of latched and keyboard holds.
 
 **The LED bar above each trig** is red for a trig and green for a trigless step
 (locks but no trig), the unit's colours. Its seven cells are the seven data
@@ -200,6 +218,15 @@ The TRACK page:
   reaches all six voices. Stop returns every parameter to its stored value.
 - **A trig in POLY** restarts the filter envelope and LFOs of one voice only, as
   the firmware does for a pitchless trig.
+- **Length and speed.** The playhead moves in MIDI clocks, 24 a beat, through a
+  port of the sequencer's clock routine: a step lasts 6, 3, 8 or 4 clocks. While
+  playing, a new length takes effect when the pattern next comes round to step
+  1, and a new speed at the next step, as on the unit. The unit's quirk is kept:
+  on step 1 its step counter takes a new speed at once, while that step's own
+  timer still runs at the old one, so a speed change during step 1 can play
+  step 1 twice, skip step 2, or play it late. At the start, and after the host's playhead jumps, the pattern stands
+  where it would be had it played from the start of the song at its present
+  length and speed. It then waits for the next step to begin.
 - **Timing.** The main CPU's timing is kept: notes and modulation are taken
   every 48 samples, and knobs glide to their new value in steps every 384
   samples, as they do on the unit.
@@ -218,9 +245,14 @@ The TRACK page:
   limiter.
 - **The sequencer plays no notes.** Trigs and locks act on notes from MIDI. On
   the unit a trig also plays its own note, and MIDI notes do not end locks (turn
-  NOTE ENDS off for that). Not included: step pitch, note-off trigs, separate AMP/FILT/LFO trig tracks per step, pattern length,
-  swing, slide, the arpeggiator, MULTI TRIG transpose, and KIT ASSIGN other than
-  pitch bend (velocity, key position, the joystick's vertical axis).
+  NOTE ENDS off for that). Not included: step pitch, note-off trigs, separate
+  AMP/FILT/LFO trig tracks per step, swing, slide, page copy, paste and clear,
+  rotating trigs, song mode's offset and length per row, the arpeggiator, MULTI
+  TRIG transpose, and KIT ASSIGN other than pitch bend (velocity, key position,
+  the joystick's vertical axis).
+- **Where a pattern starts.** The unit starts a pattern at step 1 when PLAY is
+  pressed. Here the step follows the host's song position, counted from the
+  start of the song.
 - **Removing a trig keeps its locks** (the step turns green), where the unit
   clears them. Use CLR LOCKS. A hold on an empty step does not add a trig.
 - **SRR just after it is turned down.** The firmware's SRR then reads memory
@@ -243,6 +275,9 @@ The TRACK page:
 | POLY's voice allocator | the same | 200,000 note events | 0 differ |
 | Which locks a step sends, and returns to the kit | the same | 100,000 steps | 0 differ |
 | Locks applied to the words and LFOs | the same | 54,050 locks over 100,000 frames | 0 differ |
+| The playhead with length and speed changing at random (which step runs at each clock, and the counter's state) | the main OS's clock routine, the same way | 1.6 M clocks, 345,104 steps, 64,254 changes | 0 differ |
+| Which page a longer length fills, and from where | the main OS's length setter | 160,000 lengths, 29,821 fills | 0 differ |
+| The page fill: trigs ORed in, locks copied | the main OS's page copy | 3,200 copies | 0 differ |
 | Regression hashes (`tests/test_core.c`) | hashes from the firmware | every machine | pass |
 | FM+ DYN's 1FRQ and 2FRQ texts | the main OS's display strings | 256 values | 0 differ |
 
@@ -256,7 +291,13 @@ The TRACK page:
 - POLY as a whole was not run against the firmware. Its parts were: the
   allocator, the locks, and each voice as a track. The order in which the six
   voices enter the limiter is not traced, and only matters when a chord clips.
-- The sequencer's step timing is the host's transport, not the unit's clock.
+- The step timing is the host's transport, not the unit's clock. The clock
+  routine was run with an external MIDI clock; its internal timer and swing were
+  not run, and swing is not ported.
+- The plug-in's own page fill (the editor's LEN and page buttons) is checked by
+  the editor test, not against the firmware. The firmware checks cover the rule
+  it follows and what a fill copies.
+- The 64-step pattern has not been tried by hand in Bitwig yet.
 - The main CPU's and DSP's relative timing (which of a frame's three blocks a
   new word reaches first) follows the emulator's host model. It can shift
   modulation by up to about 1 ms.
@@ -282,7 +323,7 @@ xcrun clang -std=c11 -O1 -fobjc-arc -w -I vendor/clap/include tests/gui_test.m -
 ```
 
 `test_core` needs no firmware. `clap_test` loads the bundle and checks its
-pages, parameters, state (including states saved by 0.1.0 and 0.2.0), each
+pages, parameters, state (including states saved by 0.1.0, 0.2.0 and 0.4, which load as 16 steps at 1X), each
 section's effect on the sound, POLY, the MIDI TRIG switches, trigs and locks. `gui_test` opens the
 editor off-screen and drives it with mouse and key events. All three also pass
 under AddressSanitizer and UBSan and as an Intel build under Rosetta, and the

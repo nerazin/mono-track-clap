@@ -66,6 +66,22 @@ int main(void) {
       }
       if (x != expect_track[m]) { printf("FAIL machine %d: 0x%08x\n", m, x); bad = 1; }
    }
-   puts(bad ? "FAILED" : "PASS: tables, main CPU and all eight tracks match the firmware's hashes");
+   /* SCALE SETUP (checked against the firmware in lab/track/scalecheck.py): with length and speed unchanged,
+    * clocking keeps the playhead where mt_seq_at places it after a jump, and each step runs on its first clock */
+   for (int len = 2; len <= MT_STEPS; ++len)
+      for (int sp = 0; sp < 4; ++sp) {
+         MtSeq q, r;
+         mt_seq_at(&q, -500, len, sp);
+         for (int64_t c = -500; c < 2500 && !bad; ++c) {
+            const int n = mt_clocks[sp], into = (int)(((c % n) + n) % n), run = mt_seq_clock(&q, len, sp);
+            const int64_t steps = (c - into) / n;
+            mt_seq_at(&r, c + 1, len, sp);
+            if (memcmp(&q, &r, sizeof q) || run != (into ? -1 : (int)(((steps % len) + len) % len))) {
+               printf("FAIL playhead: length %d speed %d clock %lld\n", len, sp, (long long)c);
+               bad = 1;
+            }
+         }
+      }
+   puts(bad ? "FAILED" : "PASS: tables, main CPU and all eight tracks match the firmware's hashes; the playhead keeps its place");
    return bad;
 }

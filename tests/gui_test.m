@@ -14,7 +14,11 @@
  *  - CPY and PST under a selected trig copy its trig and all its locks
  *  - a press on an LFO tab slides across the tabs; turning PAGE redraws DEST's name
  *  - each LFO tab graphs its LFO: a moving dot redraws it, a still or very fast LFO does not,
- *    a moving dot trails a blue plume, and a very fast LFO's whole wave fades to pink */
+ *    a moving dot trails a blue plume, and a very fast LFO's whole wave fades to pink
+ *  - SCALE: the speed cycles; a page button shows its page on the pads, and one past the
+ *    end extends the pattern, filling each empty page it reaches as the unit does; LEN
+ *    drags, and a shorter pattern sends the pads back to page 1; switching pages lets go
+ *    of held trigs; the playing page's button shows the playhead */
 #import <Cocoa/Cocoa.h>
 #include <dlfcn.h>
 #include <objc/runtime.h>
@@ -24,7 +28,7 @@
 #include "../source/mono_track_ui.h"
 
 #define CHECK(c, ...) do { if (!(c)) { printf("FAIL line %d: ", __LINE__); printf(__VA_ARGS__); puts(""); exit(1); } } while (0)
-enum { STATE = 8 + 8 * NPARAM + 2 + UI_STEPS * UI_LOCKS };
+enum { PAT = 8 + 8 * NPARAM, LOCKS = PAT + 10, STATE = LOCKS + UI_STEPS * UI_LOCKS };
 
 static int flushes, begins, ends, values;
 static void host_flush(const clap_host_params_t *x);
@@ -108,8 +112,10 @@ static Buf save(void) {
    CHECK(((const clap_plugin_state_t *)P->get_extension(P, CLAP_EXT_STATE))->save(P, &os) && b.n == STATE, "save");
    return b;
 }
-static unsigned trigs(void) { Buf b = save(); const uint8_t *q = b.d + 8 + 8 * NPARAM; return q[0] | q[1] << 8; }
-static int lockv(int step, int id) { Buf b = save(); return (int8_t)b.d[8 + 8 * NPARAM + 2 + step * UI_LOCKS + id]; }
+static uint64_t trigs(void) { Buf b = save(); uint64_t t = 0; for (int i = 0; i < 8; ++i) t |= (uint64_t)b.d[PAT + i] << (8 * i); return t; }
+static int lockv(int step, int id) { Buf b = save(); return (int8_t)b.d[LOCKS + step * UI_LOCKS + id]; }
+static int length(void) { return save().d[PAT + 8]; }
+static int speed(void) { return save().d[PAT + 9]; }
 static double val(int id) { double v; PA->get_value(P, (clap_id)id, &v); return v; }
 static void shot(const char *dir, const char *name) {
    if (!dir) return;
@@ -206,9 +212,8 @@ static NSRect padButton(int i, BOOL paste) { return NSMakeRect(padx(i) + (paste 
 static void clickButton(int i, BOOL paste) { const NSRect b = padButton(i, paste); click(NSMidX(b), NSMidY(b)); }
 static BOOL sameStep(int a, int b) {
    Buf x = save();
-   const uint8_t *q = x.d + 8 + 8 * NPARAM;
-   const unsigned t = q[0] | q[1] << 8;
-   return (t >> a & 1) == (t >> b & 1) && !memcmp(q + 2 + a * UI_LOCKS, q + 2 + b * UI_LOCKS, UI_LOCKS);
+   const uint64_t t = trigs();
+   return (t >> a & 1) == (t >> b & 1) && !memcmp(x.d + LOCKS + a * UI_LOCKS, x.d + LOCKS + b * UI_LOCKS, UI_LOCKS);
 }
 typedef struct { clap_input_events_t api; const clap_event_header_t *e; } One;
 static uint32_t one_size(const clap_input_events_t *x) { return ((const One *)x->ctx)->e ? 1 : 0; }
@@ -295,7 +300,7 @@ int main(int argc, char **argv) {
 
    /* a click toggles a trig */
    click(padx(0), PADY);
-   CHECK(trigs() == 1, "click sets: %x", trigs());
+   CHECK(trigs() == 1, "click sets: %llx", (unsigned long long)trigs());
    click(padx(0), PADY);
    CHECK(trigs() == 0, "click clears");
    /* a long press only shows the step */
@@ -327,7 +332,7 @@ int main(int argc, char **argv) {
    right(padx(9), PADY);
    drag(kx(3, 2), ky(2), -40);
    CHECK(lockv(4, P_EFX + 2) >= 0 && lockv(4, P_EFX + 2) == lockv(9, P_EFX + 2), "two held steps");
-   CHECK(trigs() == 1 << 4, "a right-click hold adds no trig: %x", trigs());
+   CHECK(trigs() == 1 << 4, "a right-click hold adds no trig: %llx", (unsigned long long)trigs());
    right(padx(9), PADY);
    right(padx(4), PADY);
    /* released: a drag is a kit edit again, and one gesture */
@@ -342,7 +347,7 @@ int main(int argc, char **argv) {
    /* ctrl-click latches too; CLR LOCKS clears only the held step */
    mouse(NSEventTypeLeftMouseDown, padx(4), PADY, NSEventModifierFlagControl, 1);
    mouse(NSEventTypeLeftMouseUp, padx(4), PADY, NSEventModifierFlagControl, 1);
-   click(1136 + 30, 350);
+   click(1136 + 30, 359);
    CHECK(lockv(4, filtW) == -1 && lockv(9, P_EFX + 2) >= 0, "CLR LOCKS");
    CHECK(trigs() == 1 << 4, "CLR LOCKS keeps the trig");
    /* closing the window releases the latch */
@@ -360,7 +365,7 @@ int main(int argc, char **argv) {
    click(NSMidX(keysRow), NSMidY(keysRow));
    CHECK(W.firstResponder == V, "first responder after KEYS");
    static const unsigned short codes[16] = {18, 19, 20, 21, 23, 22, 26, 28, 12, 13, 14, 15, 17, 16, 32, 34};
-   for (int i = 0; i < 16; ++i) { unsigned before16 = trigs(); tap(codes[i]); CHECK((trigs() ^ before16) == 1u << i, "key %d", i); tap(codes[i]); }
+   for (int i = 0; i < 16; ++i) { uint64_t before16 = trigs(); tap(codes[i]); CHECK((trigs() ^ before16) == 1u << i, "key %d", i); tap(codes[i]); }
    /* hold a key, edit, release: a lock, and the trig unchanged */
    key(NSEventTypeKeyDown, 14);    /* E: the eleventh trig, index 10 */
    drag(kx(1, 0), ky(0), -20);
@@ -398,10 +403,10 @@ int main(int argc, char **argv) {
    /* POLY and the MIDI TRIG switches are ordinary parameters */
    CHECK(val(P_POLY) == 0 && val(P_TRIG_SYN) == 1 && val(P_TRIG_FILT) == 1 && val(P_TRIG_LFO) == 1 && val(P_LOCK_END) == 1, "defaults");
    click(1224 + 64, 12 + 53 * 5 + 28);
-   click(936 + 30, 316);
-   click(1136 + 38, 316);
+   click(936 + 30, 307);
+   click(1136 + 38, 307);
    CHECK(val(P_POLY) == 1 && val(P_TRIG_SYN) == 0 && val(P_LOCK_END) == 0, "switches");
-   click(1136 + 38, 316);
+   click(1136 + 38, 307);
    CHECK(val(P_LOCK_END) == 1, "NOTE ENDS back on");
    shot(dir, "5_poly");
 
@@ -607,7 +612,7 @@ int main(int argc, char **argv) {
    {
       const double kitW = val(P_FILT);
       /* not selected: no buttons */
-      const unsigned t0 = trigs();
+      const uint64_t t0 = trigs();
       clickButton(1, YES);
       clickButton(1, NO);
       CHECK(trigs() == t0, "buttons on an unselected trig");
@@ -660,7 +665,7 @@ int main(int argc, char **argv) {
       right(padx(5), PADY);
       /* held with a key: the button works, and releasing the key is not a tap */
       click(NSMidX(keysRow), NSMidY(keysRow));
-      const unsigned t1 = trigs();
+      const uint64_t t1 = trigs();
       key(NSEventTypeKeyDown, 23);               /* 5: index 4 */
       [NSThread sleepForTimeInterval:0.3];
       pump();
@@ -677,7 +682,7 @@ int main(int argc, char **argv) {
       CHECK(sameStep(4, 3), "paste under a held key");
       /* a key pressed on a latched trig, CPY clicked at once: releasing the key is still no tap */
       right(padx(4), PADY);
-      const unsigned t2 = trigs();
+      const uint64_t t2 = trigs();
       key(NSEventTypeKeyDown, 23);
       clickButton(4, NO);
       key(NSEventTypeKeyUp, 23);
@@ -699,6 +704,80 @@ int main(int argc, char **argv) {
       clickButton(6, YES);
       CHECK(sameStep(4, 6), "the clipboard after reopening");
       right(padx(6), PADY);
+   }
+
+   /* SCALE: LEN, the speed, the pages */
+   {
+#define SCALEY 359
+      const CGFloat lenx = 960, spdx = 1007;
+      CGFloat (^pagex)(int) = ^CGFloat(int k) { return 1041 + 24 * k; };
+      CHECK(length() == 16 && speed() == 0, "16 steps at 1X: %d %d", length(), speed());
+      for (int i = 1; i <= 4; ++i) { click(spdx, SCALEY); CHECK(speed() == (i & 3), "speed %d", speed()); }
+      /* page 2 is past the end: clicking it makes 32 steps, page 1 copied into it, and the pads show it */
+      click(pagex(1), SCALEY);
+      CHECK(length() == 32, "page 2 extends to 32: %d", length());
+      for (int t = 0; t < 16; ++t) CHECK(sameStep(t, 16 + t), "page 2 step %d is page 1's", t);
+      const uint64_t t3 = trigs();
+      click(padx(5), PADY);
+      CHECK(trigs() == (t3 ^ 1ull << 21), "pad 6 on page 2 is step 22");
+      click(pagex(0), SCALEY);
+      click(padx(5), PADY);
+      CHECK(trigs() == (t3 ^ 1ull << 21 ^ 1ull << 5), "pad 6 on page 1 is step 6");
+      click(padx(5), PADY);
+      /* page 3: steps 33-48 come from page 1; page 2, no longer empty, is kept */
+      click(pagex(2), SCALEY);
+      CHECK(length() == 48, "48 steps");
+      for (int t = 0; t < 16; ++t) CHECK(sameStep(t, 32 + t), "page 3 step %d is page 1's", t);
+      CHECK(trigs() >> 21 & 1 ^ (t3 >> 21 & 1), "page 2 kept its own trig");
+      /* page 4 comes from page 2 */
+      click(pagex(3), SCALEY);
+      CHECK(length() == 64, "64 steps");
+      for (int t = 0; t < 16; ++t) CHECK(sameStep(16 + t, 48 + t), "page 4 step %d is page 2's", t);
+      /* LEN: a drag down shortens; past page 4's start the pads go back to page 1 */
+      drag(lenx, SCALEY, 40);
+      const int l1 = length();
+      CHECK(l1 < 64 && l1 >= 48, "LEN drag: %d", l1);
+      drag(lenx, SCALEY, 100);
+      CHECK(length() < 48, "LEN drag further: %d", length());
+      pump();
+      const uint64_t t4 = trigs();
+      click(padx(2), PADY);
+      CHECK(trigs() == (t4 ^ 1ull << 2), "back on page 1 after the pattern got shorter");
+      click(padx(2), PADY);
+      /* growing again over pages that hold steps copies nothing */
+      const Buf before = save();
+      drag(lenx, SCALEY, -200);
+      CHECK(length() == 64, "LEN drag up: %d", length());
+      CHECK(!memcmp(before.d + LOCKS, save().d + LOCKS, UI_STEPS * UI_LOCKS) && trigs() == t4, "full pages were overwritten");
+      mouse(NSEventTypeLeftMouseDown, lenx, SCALEY, 0, 2);
+      mouse(NSEventTypeLeftMouseUp, lenx, SCALEY, 0, 2);
+      pump();
+      CHECK(length() == 16, "double-click LEN: %d", length());
+      /* a latched trig is let go when the page changes: the next knob turn is the kit's */
+      click(pagex(2), SCALEY);
+      click(pagex(0), SCALEY);
+      right(padx(3), PADY);
+      click(pagex(1), SCALEY);
+      const double kit = val(P_FILT + 2);
+      drag(kx(2, 2), ky(2), -30);
+      CHECK(val(P_FILT + 2) > kit && lockv(3, P_FILT + 2) == -1 && lockv(19, P_FILT + 2) == -1, "a latch survived the page change");
+      /* 40 steps; the playing page's button carries the playhead, here step 39 on page 3 */
+      click(pagex(2), SCALEY);
+      drag(lenx, SCALEY, 26);
+      CHECK(length() == 40, "LEN 40: %d", length());
+      click(pagex(0), SCALEY);
+      const NSRect page3 = NSMakeRect(pagex(2) - 11, 346, 22, 26);
+      const int still = brightIn(page3);
+      CHECK(P->activate(P, 44100, 1, 512) && P->start_processing(P), "activate");
+      process(NULL, 38 / 4.0, true);
+      pump(); pump();
+      CHECK(brightIn(page3) > still, "no playhead on page 3: %d %d", brightIn(page3), still);
+      click(pagex(2), SCALEY);
+      shot(dir, "11_pages");
+      process(NULL, 0, false);
+      P->stop_processing(P);
+      P->deactivate(P);
+      click(pagex(0), SCALEY);
    }
 
    /* a host resize scales the layout */
