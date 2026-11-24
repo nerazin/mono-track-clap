@@ -226,15 +226,15 @@ int main(int argc, char **argv) {
       {   /* ENS's PCH2-4 read as intervals, and typed semitones pick the nearest one */
          const clap_plugin_t *e = create(4);
          const clap_plugin_params_t *pe = e->get_extension(e, CLAP_EXT_PARAMS);
-         static const struct { double v; const char *text; } pch[] = {{0, "-12 st"}, {63, "OFF"}, {127, "+12 st"}, {20, "-7.02 st"}, {64, "+1 st"}, {104, "+7.02 st"}};
+         static const struct { double v; const char *text; } pch[] = {{0, "-12 st"}, {63, "OFF"}, {127, "+12 st"}, {20, "-7.02 st (2/3)"}, {64, "+1 st"}, {104, "+7.02 st (3/2)"}};
          for (unsigned i = 0; i < sizeof pch / sizeof pch[0]; ++i)
             CHECK(pe->value_to_text(e, SYN + 1, pch[i].v, t, sizeof t) && !strcmp(t, pch[i].text), "PCH3 %g: %s", pch[i].v, t);
          double v;
          CHECK(pe->text_to_value(e, SYN, "+7", &v) && pe->value_to_text(e, SYN, v, t, sizeof t) && !strcmp(t, "+7 st"), "typed +7: %s", t);
-         CHECK(pe->text_to_value(e, SYN, "7.02", &v) && pe->value_to_text(e, SYN, v, t, sizeof t) && !strcmp(t, "+7.02 st"), "typed 7.02: %s", t);
+         CHECK(pe->text_to_value(e, SYN, "7.02", &v) && pe->value_to_text(e, SYN, v, t, sizeof t) && !strcmp(t, "+7.02 st (3/2)"), "typed 7.02: %s", t);
          CHECK(pe->text_to_value(e, SYN, "off", &v) && pe->value_to_text(e, SYN, v, t, sizeof t) && !strcmp(t, "OFF"), "typed off: %s", t);
          CHECK(pe->value_to_text(e, SYN + 3, 20, t, sizeof t) && !strcmp(t, "20.0"), "WAVE stays a number: %s", t);
-         CHECK(pe->text_to_value(e, SYN, "3/2", &v) && pe->value_to_text(e, SYN, v, t, sizeof t) && !strcmp(t, "+7.02 st"), "typed 3/2: %s", t);
+         CHECK(pe->text_to_value(e, SYN, "3/2", &v) && pe->value_to_text(e, SYN, v, t, sizeof t) && !strcmp(t, "+7.02 st (3/2)"), "typed 3/2: %s", t);
          CHECK(pe->value_to_text(e, SYN + 4, 64, t, sizeof t) && !strcmp(t, "+0.0"), "ENS PW is bipolar: %s", t);
          e->destroy(e);
       }

@@ -66,7 +66,7 @@ static const char *const features[] = {
    CLAP_PLUGIN_FEATURE_INSTRUMENT, CLAP_PLUGIN_FEATURE_SYNTHESIZER, CLAP_PLUGIN_FEATURE_STEREO, NULL
 };
 #define DESCRIPTOR(m) { .clap_version = CLAP_VERSION_INIT, .id = machines[m].id, .name = machines[m].name, \
-   .vendor = "Independent DSP", .url = "", .manual_url = "", .support_url = "", .version = "0.4.2", \
+   .vendor = "Independent DSP", .url = "", .manual_url = "", .support_url = "", .version = "0.4.3", \
    .description = "A whole Monomachine track: machine, EQ, filter, AMP, SRR, delay, LFOs, ported from its code", .features = features }
 static const clap_plugin_descriptor_t descriptors[MT_MACHINES] = {
    DESCRIPTOR(0), DESCRIPTOR(1), DESCRIPTOR(2), DESCRIPTOR(3), DESCRIPTOR(4), DESCRIPTOR(5), DESCRIPTOR(6), DESCRIPTOR(7),
@@ -769,9 +769,9 @@ static bool params_to_text(const clap_plugin_t *p, clap_id cid, double v, char *
       default: snprintf(out, cap, "%d", k); break;
       }
    } else if (is_switch(id)) snprintf(out, cap, "%s", v >= 0.5 ? "ON" : "OFF");
-   else if (is_ens_pitch(m, id)) {   /* unison mutes the oscillator; the just intervals show their cents */
+   else if (is_ens_pitch(m, id)) {   /* unison mutes the oscillator; the just intervals show their cents and ratio */
       const int st = ens_step(v);
-      if (ms_ens_steps[st].num) snprintf(out, cap, "%+.2f st", ens_semitones(st));
+      if (ms_ens_steps[st].num) snprintf(out, cap, "%+.2f st (%d/%d)", ens_semitones(st), ms_ens_steps[st].num, ms_ens_steps[st].den);
       else if (ms_ens_steps[st].semi) snprintf(out, cap, "%+d st", ms_ens_steps[st].semi);
       else snprintf(out, cap, "OFF");
    } else if (is_onoff(m, id)) snprintf(out, cap, "%s", knob_word(v) >= 0x400000 ? "ON" : "OFF");

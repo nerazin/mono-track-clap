@@ -132,9 +132,10 @@ main OS:
   unit's display; the ratios there are 1.98 and 3.94.
 - ENS's PCH2, PCH3 and PCH4 show each oscillator's interval to the first in
   semitones. Equal-tempered steps read as whole semitones ("+7 st"), and the
-  just intervals show their cents ("+7.02 st" is 3/2, "-3.86 st" is 4/5). The
-  unit writes these "+07" and "3/2". At unison the oscillator is muted, so the
-  knob reads OFF.
+  just intervals show their cents and the ratio the unit names them by
+  ("+7.02 st (3/2)", "-3.86 st (4/5)"); the editor puts the ratio on a second
+  line. The unit writes the steps "+07". At unison the oscillator is muted, so
+  the knob reads OFF.
 
 Typed values work the same way: semitones or a ratio such as "3/2" on ENS, a
 ratio such as "3/16" or "1.5" on the FM+ frequencies, OFF or ON.

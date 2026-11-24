@@ -311,8 +311,11 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
 
    char text[CLAP_NAME_SIZE] = "";
    _params->value_to_text(_p, (clap_id)ident, ident == _dragId || lit ? b : eff, text, sizeof text);
-   drawText(text, NSMakeRect(c->r.origin.x, c->r.origin.y + 80, c->r.size.width, 14), 10, NSFontWeightRegular,
-            lit ? C(LOCK, 1) : C(MUTED, holding && lockable ? 0.6 : 1), NSTextAlignmentCenter);
+   char *ratio = strstr(text, " (");   /* a ratio after the value, as ENS's "+7.02 st (3/2)", goes on a second line */
+   if (ratio) *ratio++ = 0;
+   NSColor *color = lit ? C(LOCK, 1) : C(MUTED, holding && lockable ? 0.6 : 1);
+   drawText(text, NSMakeRect(c->r.origin.x, c->r.origin.y + 80, c->r.size.width, 14), 10, NSFontWeightRegular, color, NSTextAlignmentCenter);
+   if (ratio) drawText(ratio, NSMakeRect(c->r.origin.x, c->r.origin.y + 93, c->r.size.width, 14), 10, NSFontWeightRegular, color, NSTextAlignmentCenter);
 }
 
 - (void)drawSlider:(const Ctl *)c {
