@@ -35,7 +35,8 @@ static NSColor *C(unsigned rgb, double a) {
    return [NSColor colorWithSRGBRed:(rgb >> 16 & 255) / 255.0 green:(rgb >> 8 & 255) / 255.0 blue:(rgb & 255) / 255.0 alpha:a];
 }
 enum : unsigned { BG = 0x141518, PANEL = 0x1d1f24, LINE = 0x31343c, TEXT = 0xd5d8df, MUTED = 0x858a96, VALUE = 0xeef1f6,
-                  LOCK = 0xffb020, MOD = 0xb18cff, TRIG = 0xff453a, TRIGLESS = 0x32d74b, NOTE = 0x4cc9ff, DARK = 0x101114 };
+                  LOCK = 0xffb020, MOD = 0xb18cff, TRIG = 0xff453a, TRIGLESS = 0x32d74b, NOTE = 0x4cc9ff, DARK = 0x101114,
+                  FAST = 0xff5fa2 };   /* FAST: an LFO too quick for its graph to follow */
 
 static void drawText(const char *s, NSRect r, CGFloat size, NSFontWeight w, NSColor *color, NSTextAlignment align) {
    NSMutableParagraphStyle *p = [NSMutableParagraphStyle new];
@@ -462,7 +463,7 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
 }
 /* How fast an LFO runs, from 0 (slow enough to follow its dot) to 1 (4 to 12 cycles a
  * second and up). At 60 frames a second a faster dot lands anywhere on the wave from one
- * frame to the next and only flickers, so the graph stops moving and lights up instead. */
+ * frame to the next and only flickers, so the graph stops moving and changes colour instead. */
 - (double)lfoFast:(int)l {
    const double hz = atomic_load_explicit(&_ui->lfo_inc[l], memory_order_relaxed) / 8388608.0 * 44100 / 384;
    return fmin(fmax((hz - 4) / 8, 0), 1);
@@ -482,15 +483,16 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
    return h;
 }
 /* The wave over one cycle, drawn from its shape so it stays clean at any speed, on a zero
- * line, with a dot where the LFO is now. Fast, the dot fades out and the wave glows. */
+ * line, with a dot where the LFO is now. Fast, the dot turns pink and the wave glows; too
+ * fast to follow, the dot rests at the cycle's start. */
 - (void)drawLfo:(int)l in:(NSRect)g on:(BOOL)on {
    CGContextRef ctx = NSGraphicsContext.currentContext.CGContext;
    const int wave = atomic_load_explicit(&_ui->lfo_wave[l], memory_order_relaxed);
    const double fast = [self lfoFast:l], x0 = g.origin.x, mid = NSMidY(g), half = g.size.height / 2 - 1.5;
    CGContextSaveGState(ctx);
-   if (atomic_load_explicit(&_ui->lfo_depth[l], memory_order_relaxed) == 0) CGContextSetAlpha(ctx, 0.35);   /* DPTH 0: it moves nothing */
+   if (atomic_load_explicit(&_ui->lfo_depth[l], memory_order_relaxed) == 0) CGContextSetAlpha(ctx, 0.4);   /* DPTH 0: it moves nothing */
    CGContextSetLineWidth(ctx, 1);
-   CGContextSetStrokeColorWithColor(ctx, C(LINE, 1).CGColor);
+   CGContextSetStrokeColorWithColor(ctx, C(MUTED, 0.5).CGColor);
    CGContextMoveToPoint(ctx, x0, mid);
    CGContextAddLineToPoint(ctx, NSMaxX(g), mid);
    CGContextStrokePath(ctx);
@@ -509,16 +511,16 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
       CGContextStrokePath(ctx);
    }
    CGContextAddPath(ctx, path);
-   CGContextSetLineWidth(ctx, 1.25);
-   CGContextSetStrokeColorWithColor(ctx, [C(on ? TEXT : MUTED, 1) blendedColorWithFraction:fast ofColor:C(VALUE, 1)].CGColor);
+   CGContextSetLineWidth(ctx, 1.5);
+   CGContextSetStrokeColorWithColor(ctx, [C(on ? VALUE : TEXT, 1) blendedColorWithFraction:fast ofColor:C(VALUE, 1)].CGColor);
    CGContextStrokePath(ctx);
    CGPathRelease(path);
-   if (fast < 1) {
-      const double x = fmin(atomic_load_explicit(&_ui->lfo_pos[l], memory_order_relaxed) / 8388608.0, 0.9999);
-      const CGPoint p = CGPointMake(x0 + x * g.size.width, mid - lfoShape(wave, x, _rnd[l]) * half);
-      CGContextSetFillColorWithColor(ctx, C(VALUE, 1 - fast).CGColor);
-      CGContextFillEllipseInRect(ctx, CGRectMake(p.x - 2, p.y - 2, 4, 4));
-   }
+   const double x = fast < 1 ? fmin(atomic_load_explicit(&_ui->lfo_pos[l], memory_order_relaxed) / 8388608.0, 0.9999) : 0;
+   const CGPoint p = CGPointMake(x0 + x * g.size.width, mid - lfoShape(wave, x, _rnd[l]) * half);
+   CGContextSetFillColorWithColor(ctx, C(on ? PANEL : BG, 1).CGColor);   /* a ring of the tab's own colour sets the dot off the wave */
+   CGContextFillEllipseInRect(ctx, CGRectMake(p.x - 4, p.y - 4, 8, 8));
+   CGContextSetFillColorWithColor(ctx, [C(VALUE, 1) blendedColorWithFraction:fast ofColor:C(FAST, 1)].CGColor);
+   CGContextFillEllipseInRect(ctx, CGRectMake(p.x - 2.5, p.y - 2.5, 5, 5));
    CGContextRestoreGState(ctx);
 }
 - (uint64_t)signature:(const Ctl *)c {

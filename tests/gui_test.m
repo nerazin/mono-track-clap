@@ -13,7 +13,8 @@
  *    is released moves neither the kit value nor the lock
  *  - CPY and PST under a selected trig copy its trig and all its locks
  *  - a press on an LFO tab slides across the tabs; turning PAGE redraws DEST's name
- *  - each LFO tab graphs its LFO: a moving dot redraws it, a still or very fast LFO does not */
+ *  - each LFO tab graphs its LFO: a moving dot redraws it, a still or very fast LFO does not,
+ *    and a very fast one's dot turns pink */
 #import <Cocoa/Cocoa.h>
 #include <dlfcn.h>
 #include <objc/runtime.h>
@@ -154,6 +155,15 @@ static double noteLine(int i) {
    const unsigned char *q = rep.bitmapData + (rep.pixelsHigh / 2) * rep.bytesPerRow + (rep.pixelsWide / 2) * rep.bitsPerPixel / 8;
    const double b = (q[2] - 24.0) / (255 - 24.0);   /* the window's blue is 0x18 */
    return q[2] > q[0] + 8 && b > 0.01 ? b : 0;
+}
+/* The colour at a point of the view: red, green, blue. */
+static void pixel(CGFloat x, CGFloat y, int c[3]) {
+   const NSRect r = NSMakeRect(x - 1, y - 1, 2, 2);
+   [V setNeedsDisplay:YES];
+   NSBitmapImageRep *rep = [V bitmapImageRepForCachingDisplayInRect:r];
+   [V cacheDisplayInRect:r toBitmapImageRep:rep];
+   const unsigned char *q = rep.bitmapData + (rep.pixelsHigh / 2) * rep.bytesPerRow + (rep.pixelsWide / 2) * rep.bitsPerPixel / 8;
+   for (int i = 0; i < 3; ++i) c[i] = q[i];
 }
 /* A trackpad or wheel event. phase: 1 began, 2 changed, 4 ended, 128 may begin. momentum: 1 begin, 2 continue, 3 end. */
 static void scroll(CGFloat x, CGFloat y, int dy, int phase, int momentum, BOOL trackpad) {
@@ -451,7 +461,8 @@ int main(int argc, char **argv) {
    {
       CHECK(P->activate(P, 44100, 1, 512) && P->start_processing(P), "activate");
       static const struct { int id; double v, back; } set[] = {
-         {P_LFO + 5, 127, 64}, {P_LFO + 4, 1, 0}, {P_LFO + 8 + 5, 0, 64}, {P_LFO + 16 + 5, 127, 64}, {P_LFO + 16 + 4, 6, 0}};
+         {P_LFO + 5, 127, 64}, {P_LFO + 4, 1, 0}, {P_LFO + 8 + 5, 0, 64}, {P_LFO + 16 + 5, 127, 64}, {P_LFO + 16 + 4, 6, 0},
+         {P_LFO + 16 + 7, 100, 0}};
       for (unsigned i = 0; i < sizeof set / sizeof set[0]; ++i) {
          clap_event_param_value_t e = {{sizeof e, 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0}, (clap_id)set[i].id, NULL, -1, -1, -1, -1, set[i].v};
          process(&e.header, 0, false);
@@ -462,6 +473,9 @@ int main(int argc, char **argv) {
       for (int i = 0; i < 20; ++i) { process(NULL, 0, false); pump(); }
       CHECK(redrawn(976 + 38, 30) && !redrawn(976 + 76 + 38, 30) && !redrawn(976 + 152 + 38, 30), "LFO tab redraws: %d %d %d",
             redrawn(976 + 38, 30), redrawn(976 + 76 + 38, 30), redrawn(976 + 152 + 38, 30));
+      int dot[3];
+      pixel(1172, 30, dot);   /* LFO3's dot, too fast to follow: pink, at the cycle's start */
+      CHECK(dot[0] > 200 && dot[1] < 150 && dot[2] > 110, "LFO3's dot: %d %d %d", dot[0], dot[1], dot[2]);
       for (unsigned i = 0; i < sizeof set / sizeof set[0]; ++i) {
          clap_event_param_value_t e = {{sizeof e, 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0}, (clap_id)set[i].id, NULL, -1, -1, -1, -1, set[i].back};
          process(&e.header, 0, false);
