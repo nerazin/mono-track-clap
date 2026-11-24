@@ -118,6 +118,12 @@ SYN by machine:
 | FM+ PAR | 1FRQ 1ENV 2FRQ 2ENV 3FRQ 3ENV TONE TUNE |
 | FM+ DYN | 1FRQ 1FEN 1VOL 1VEN 2FRQ 2ENV 2FB TUNE |
 
+On ENS, PCH2, PCH3 and PCH4 show each oscillator's interval to the first in
+semitones. Equal-tempered steps read as whole semitones ("+7 st"), and the
+just intervals show their cents ("+7.02 st" is 3/2, "-3.86 st" is 4/5). At
+unison the oscillator is muted, so the knob reads OFF. Typing a number of
+semitones picks the nearest interval.
+
 The LFO controls:
 
 - **PAGE**: PTCH, SYN, AMP, FILT, EFX, LFO1, LFO2, LFO3, MIDI. MIDI has no

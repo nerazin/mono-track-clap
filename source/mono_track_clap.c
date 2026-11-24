@@ -65,7 +65,7 @@ static const char *const features[] = {
    CLAP_PLUGIN_FEATURE_INSTRUMENT, CLAP_PLUGIN_FEATURE_SYNTHESIZER, CLAP_PLUGIN_FEATURE_STEREO, NULL
 };
 #define DESCRIPTOR(m) { .clap_version = CLAP_VERSION_INIT, .id = machines[m].id, .name = machines[m].name, \
-   .vendor = "Independent DSP", .url = "", .manual_url = "", .support_url = "", .version = "0.4.0", \
+   .vendor = "Independent DSP", .url = "", .manual_url = "", .support_url = "", .version = "0.4.1", \
    .description = "A whole Monomachine track: machine, EQ, filter, AMP, SRR, delay, LFOs, ported from its code", .features = features }
 static const clap_plugin_descriptor_t descriptors[MT_MACHINES] = {
    DESCRIPTOR(0), DESCRIPTOR(1), DESCRIPTOR(2), DESCRIPTOR(3), DESCRIPTOR(4), DESCRIPTOR(5), DESCRIPTOR(6), DESCRIPTOR(7),
@@ -702,6 +702,16 @@ static bool bipolar(int m, int id) {
    if (id < P_AMP) return machines[m].bipolar >> id & 1;
    return id < P_LFO && (knob_bipolar[id / 8 - 1] >> (id % 8) & 1);
 }
+/* ENS's PCH2-4: the step of ms_ens_steps a knob value selects, and its interval in semitones */
+static bool is_ens_pitch(int m, int id) { return m == MT_ENS && id >= P_SYN && id < P_SYN + 3; }
+static int ens_step(double v) {
+   int k = (int)(lrint(clamp(v, 0, 127) * 65536.0) >> 16), s = 0;
+   while (k >= ms_ens_steps[s].run) k -= ms_ens_steps[s++].run;
+   return s;
+}
+static double ens_semitones(int s) {
+   return ms_ens_steps[s].num ? 12 * log2((double)ms_ens_steps[s].num / ms_ens_steps[s].den) : ms_ens_steps[s].semi;
+}
 static bool params_to_text(const clap_plugin_t *p, clap_id cid, double v, char *out, uint32_t cap) {
    const Plugin *s = p->plugin_data;
    const int id = (int)cid, m = s->machine;
@@ -717,7 +727,12 @@ static bool params_to_text(const clap_plugin_t *p, clap_id cid, double v, char *
       default: snprintf(out, cap, "%d", k); break;
       }
    } else if (is_switch(id)) snprintf(out, cap, "%s", v >= 0.5 ? "ON" : "OFF");
-   else if (id == P_BEND) snprintf(out, cap, "%s", range_name[(int)lrint(clamp(v, 0, 7))]);
+   else if (is_ens_pitch(m, id)) {   /* unison mutes the oscillator; the just intervals show their cents */
+      const int st = ens_step(v);
+      if (ms_ens_steps[st].num) snprintf(out, cap, "%+.2f st", ens_semitones(st));
+      else if (ms_ens_steps[st].semi) snprintf(out, cap, "%+d st", ms_ens_steps[st].semi);
+      else snprintf(out, cap, "OFF");
+   } else if (id == P_BEND) snprintf(out, cap, "%s", range_name[(int)lrint(clamp(v, 0, 7))]);
    else if (id == P_MTUNE) snprintf(out, cap, "%.1f Hz", lrint(clamp(v, 400, 499.9) * 10) / 10.0);
    else if (bipolar(m, id)) snprintf(out, cap, "%+.1f", v - 64);
    else snprintf(out, cap, "%.1f", v);
@@ -754,6 +769,16 @@ static bool params_from_text(const clap_plugin_t *p, clap_id cid, const char *te
    }
    char *end = NULL;
    const double x = strtod(text, &end);
+   if (is_ens_pitch(s->machine, id)) {   /* "OFF" or semitones: the first knob value of the nearest interval */
+      const bool off = !strcasecmp(text, "off");
+      if (!off && (end == text || !isfinite(x))) return false;
+      double gap = 1e9;
+      for (int st = 0, k = 0; st < 33; k += ms_ens_steps[st++].run) {
+         const double d = off ? (ms_ens_steps[st].num || ms_ens_steps[st].semi) : fabs(ens_semitones(st) - x);
+         if (d < gap - 1e-9) { gap = d; *v = k; }
+      }
+      return true;
+   }
    if (end == text || !isfinite(x)) return false;
    *v = clamp(bipolar(s->machine, id) ? x + 64 : x, lo_of(id), hi_of(id));
    return true;

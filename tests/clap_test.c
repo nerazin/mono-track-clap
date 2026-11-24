@@ -223,6 +223,19 @@ int main(int argc, char **argv) {
       const clap_plugin_params_t *pa = p->get_extension(p, CLAP_EXT_PARAMS);
       char t[CLAP_NAME_SIZE];
       CHECK(pa->value_to_text(p, LFO + 3, 10, t, sizeof t) && !strcmp(t, "RND"), "wave list: %s", t);
+      {   /* ENS's PCH2-4 read as intervals, and typed semitones pick the nearest one */
+         const clap_plugin_t *e = create(4);
+         const clap_plugin_params_t *pe = e->get_extension(e, CLAP_EXT_PARAMS);
+         static const struct { double v; const char *text; } pch[] = {{0, "-12 st"}, {63, "OFF"}, {127, "+12 st"}, {20, "-7.02 st"}, {64, "+1 st"}, {104, "+7.02 st"}};
+         for (unsigned i = 0; i < sizeof pch / sizeof pch[0]; ++i)
+            CHECK(pe->value_to_text(e, SYN + 1, pch[i].v, t, sizeof t) && !strcmp(t, pch[i].text), "PCH3 %g: %s", pch[i].v, t);
+         double v;
+         CHECK(pe->text_to_value(e, SYN, "+7", &v) && pe->value_to_text(e, SYN, v, t, sizeof t) && !strcmp(t, "+7 st"), "typed +7: %s", t);
+         CHECK(pe->text_to_value(e, SYN, "7.02", &v) && pe->value_to_text(e, SYN, v, t, sizeof t) && !strcmp(t, "+7.02 st"), "typed 7.02: %s", t);
+         CHECK(pe->text_to_value(e, SYN, "off", &v) && pe->value_to_text(e, SYN, v, t, sizeof t) && !strcmp(t, "OFF"), "typed off: %s", t);
+         CHECK(pe->value_to_text(e, SYN + 3, 20, t, sizeof t) && !strcmp(t, "20.0"), "WAVE stays a number: %s", t);
+         e->destroy(e);
+      }
       CHECK(pa->value_to_text(p, LFO + 2, 4, t, sizeof t) && !strcmp(t, "HALF"), "trig list: %s", t);
       CHECK(pa->value_to_text(p, LFO + 4, 6, t, sizeof t) && !strcmp(t, "64X"), "mult list: %s", t);
       CHECK(pa->value_to_text(p, LFO + 1, 3, t, sizeof t) && !strcmp(t, "1OCT"), "PTCH dest: %s", t);
