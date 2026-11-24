@@ -448,6 +448,7 @@ static uint64_t mix(uint64_t h, double x) {
       const double b = [self shown:ident];
       h = mix(mix(mix(h, ident), b), [self effective:ident shown:b]);
       h = mix(mix(h, [self heldLock:ident]), [self activeLock:ident]);
+      if (ident >= P_LFO && ident < P_LEVEL && (ident - P_LFO) % 8 == 1) h = mix(h, [self base:ident - 1]);   /* DEST's name comes from its PAGE */
       return mix(mix(h, [self held] != 0), ident == _dragId);
    }
    case C_SWITCH: case C_KEYS: return mix(h, [self switchOn:c]);

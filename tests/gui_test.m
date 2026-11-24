@@ -11,9 +11,11 @@
  *  - a MIDI note draws a line under its step, which fades
  *  - a scroll or drag belongs to the trigs held when it began: momentum after a key
  *    is released moves neither the kit value nor the lock
- *  - CPY and PST under a selected trig copy its trig and all its locks */
+ *  - CPY and PST under a selected trig copy its trig and all its locks
+ *  - a press on an LFO tab slides across the tabs; turning PAGE redraws DEST's name */
 #import <Cocoa/Cocoa.h>
 #include <dlfcn.h>
+#include <objc/runtime.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,6 +55,16 @@ static const clap_plugin_params_t *PA;
 static NSWindow *W;
 static NSView *V;
 
+/* the editor's redraw requests, recorded */
+static NSRect dirty[256];
+static int ndirty;
+static void (*invalidate)(id, SEL, NSRect);
+static void recordInvalidate(id self, SEL s, NSRect r) { if (ndirty < 256) dirty[ndirty++] = r; invalidate(self, s, r); }
+static BOOL redrawn(CGFloat x, CGFloat y) {
+   for (int i = 0; i < ndirty; ++i)
+      if (NSPointInRect(NSMakePoint(x, y), dirty[i])) return YES;
+   return NO;
+}
 /* an off-screen window gets no display-link ticks, so the test runs the view's refresh itself */
 static void pump(void) {
    [NSRunLoop.mainRunLoop runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.005]];
@@ -245,6 +257,17 @@ int main(int argc, char **argv) {
    mouse(NSEventTypeLeftMouseUp, kx(4, 5), ky(5), 0, 2);
    CHECK(val(P_LFO + 16 + 5) == 64, "LFO3 SPD reset");
    click(976 + 30, 30);
+   /* turning PAGE redraws DEST, whose name comes from it */
+   SEL sel = @selector(setNeedsDisplayInRect:);
+   invalidate = (void (*)(id, SEL, NSRect))[NSView instanceMethodForSelector:sel];
+   CHECK(class_addMethod([V class], sel, (IMP)recordInvalidate, method_getTypeEncoding(class_getInstanceMethod([NSView class], sel))), "hook");
+   pump();
+   ndirty = 0;
+   drag(kx(4, 0), ky(0), -40);
+   CHECK(val(P_LFO) > 0 && redrawn(kx(4, 1), ky(1)), "PAGE %g redraws DEST", val(P_LFO));
+   mouse(NSEventTypeLeftMouseDown, kx(4, 0), ky(0), 0, 2);
+   mouse(NSEventTypeLeftMouseUp, kx(4, 0), ky(0), 0, 2);
+   CHECK(val(P_LFO) == 0, "PAGE reset");
 
    /* a click toggles a trig */
    click(padx(0), PADY);
