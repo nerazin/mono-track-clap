@@ -36,6 +36,13 @@ The top row is the unit's data pages: SYN, AMP, FILT, EFX and LFO1-3. The right
 column holds the track's settings, and the bottom row the 16 trigs. Pressing an
 LFO tab and sliding across the others switches to each one under the pointer.
 
+Each LFO tab shows its LFO: the wave it plays over one cycle, on a zero line,
+and a dot where it is now. The wave is drawn from its shape rather than from
+samples, so it stays clean at any speed. RND shows its eight steps as they are
+played. From about 4 cycles a second the dot would only flicker, so it fades
+out and the wave lights up instead; from 12 the graph holds still. With DPTH
+at 0 the graph is dimmed.
+
 On a knob, the needle is the stored value. An amber arc goes to a lock sounding
 now, and a violet arc shows what the host's modulation adds.
 

@@ -21,6 +21,11 @@ typedef struct {
    _Atomic int step;                          /* the playing step, -1 when stopped */
    _Atomic float mod[NPARAM];                 /* the host's modulation amount */
    _Atomic uint32_t notes[UI_STEPS];          /* MIDI notes that landed on each step, counted */
+   /* each LFO as it runs, on the track (POLY: the newest voice) */
+   _Atomic int32_t lfo_pos[3];                /* place in the cycle, 0..0x800000 */
+   _Atomic int32_t lfo_inc[3];                /* the step it moves by, 384 samples apart */
+   _Atomic int8_t lfo_wave[3], lfo_depth[3];  /* the wave played (0-10) and DPTH, LFO modulation included */
+   _Atomic int8_t lfo_rnd[3][8];              /* RND's eight steps, as last played, in 2^-7 of full scale */
    /* the copied trig: main thread only, kept while the plug-in lives, not saved */
    int clip_full, clip_trig;
    int8_t clip_lock[UI_LOCKS];

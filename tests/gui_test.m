@@ -12,7 +12,8 @@
  *  - a scroll or drag belongs to the trigs held when it began: momentum after a key
  *    is released moves neither the kit value nor the lock
  *  - CPY and PST under a selected trig copy its trig and all its locks
- *  - a press on an LFO tab slides across the tabs; turning PAGE redraws DEST's name */
+ *  - a press on an LFO tab slides across the tabs; turning PAGE redraws DEST's name
+ *  - each LFO tab graphs its LFO: a moving dot redraws it, a still or very fast LFO does not */
 #import <Cocoa/Cocoa.h>
 #include <dlfcn.h>
 #include <objc/runtime.h>
@@ -442,6 +443,29 @@ int main(int argc, char **argv) {
       process(&m.header, 0, false);
       pump(); pump();
       CHECK(viewHash() == clean, "the rings must clear");
+      P->stop_processing(P);
+      P->deactivate(P);
+   }
+
+   /* the LFO graphs: a running LFO's dot redraws its tab; a still one, or one too fast to follow, does not */
+   {
+      CHECK(P->activate(P, 44100, 1, 512) && P->start_processing(P), "activate");
+      static const struct { int id; double v, back; } set[] = {
+         {P_LFO + 5, 127, 64}, {P_LFO + 4, 1, 0}, {P_LFO + 8 + 5, 0, 64}, {P_LFO + 16 + 5, 127, 64}, {P_LFO + 16 + 4, 6, 0}};
+      for (unsigned i = 0; i < sizeof set / sizeof set[0]; ++i) {
+         clap_event_param_value_t e = {{sizeof e, 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0}, (clap_id)set[i].id, NULL, -1, -1, -1, -1, set[i].v};
+         process(&e.header, 0, false);
+      }
+      for (int i = 0; i < 8; ++i) process(NULL, 0, false);
+      pump();
+      ndirty = 0;
+      for (int i = 0; i < 20; ++i) { process(NULL, 0, false); pump(); }
+      CHECK(redrawn(976 + 38, 30) && !redrawn(976 + 76 + 38, 30) && !redrawn(976 + 152 + 38, 30), "LFO tab redraws: %d %d %d",
+            redrawn(976 + 38, 30), redrawn(976 + 76 + 38, 30), redrawn(976 + 152 + 38, 30));
+      for (unsigned i = 0; i < sizeof set / sizeof set[0]; ++i) {
+         clap_event_param_value_t e = {{sizeof e, 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0}, (clap_id)set[i].id, NULL, -1, -1, -1, -1, set[i].back};
+         process(&e.header, 0, false);
+      }
       P->stop_processing(P);
       P->deactivate(P);
    }

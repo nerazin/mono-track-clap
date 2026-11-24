@@ -98,6 +98,7 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
    double _dragValue;
    NSPoint _dragLast;
    int _scrollId;
+   int8_t _rnd[3][8];   /* RND's steps as drawn: frozen while the LFO is too fast to follow */
    double _scrollValue;
    NSTimeInterval _scrollUntil;
    id _refresh;
@@ -253,9 +254,10 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
    const NSRect r = NSInsetRect(c->r, 1, 0);
    fillRound(r, 5, on ? C(PANEL, 1) : C(BG, 1));
    strokeRound(r, 5, 1, on ? C(MUTED, 1) : C(LINE, 1));
-   drawText(c->label, NSMakeRect(r.origin.x, r.origin.y + 6, r.size.width - (n ? 14 : 0), 16), 12, NSFontWeightSemibold,
+   drawText(c->label, NSMakeRect(r.origin.x + 2, r.origin.y + 6, 40, 16), 12, NSFontWeightSemibold,
             n ? C(LOCK, 1) : on ? C(TEXT, 1) : C(MUTED, 1), NSTextAlignmentCenter);
-   if (n) [self drawChip:n at:NSMakePoint(NSMaxX(r) - 18, r.origin.y + 6)];
+   if (n) [self drawChip:n at:NSMakePoint(NSMaxX(r) - 22, r.origin.y + 6)];   /* a held step's locks take the graph's place */
+   else [self drawLfo:c->id in:NSMakeRect(NSMaxX(r) - 31, r.origin.y + 6, 26, 16) on:on];
 }
 
 - (void)drawKnob:(const Ctl *)c context:(CGContextRef)g {
@@ -438,11 +440,92 @@ static uint64_t mix(uint64_t h, double x) {
    memcpy(&u, &x, sizeof u);
    return (h ^ u) * 0x100000001b3ULL;
 }
+
+/* ---- the LFO graphs ------------------------------------------------------------------ */
+
+/* An LFO wave at x (0..1 of its cycle), in units of full scale: mt_wave's shapes. EXP
+ * falls by e^-4 a cycle at any speed; RND is eight held steps at half scale. */
+static double lfoShape(int wave, double x, const int8_t *rnd) {
+   switch (wave) {
+   case 0: return x <= 0.25 ? 4 * x : x > 0.75 ? 4 * x - 4 : 2 - 4 * x;
+   case 1: return -lfoShape(0, x, rnd);
+   case 3: return 1 - 2 * x;
+   case 4: return x < 0.5 ? 1 : -1;
+   case 5: return x < 0.5 ? -1 : 1;
+   case 6: return exp(-4 * x);
+   case 7: return -exp(-4 * x);
+   case 8: return x < 0.5 ? 2 * x : 0;
+   case 9: return x < 0.5 ? -2 * x : 0;
+   case 10: return rnd[(int)fmin(x * 8, 7)] / 128.0;
+   default: return 2 * x - 1;
+   }
+}
+/* How fast an LFO runs, from 0 (slow enough to follow its dot) to 1 (4 to 12 cycles a
+ * second and up). At 60 frames a second a faster dot lands anywhere on the wave from one
+ * frame to the next and only flickers, so the graph stops moving and lights up instead. */
+- (double)lfoFast:(int)l {
+   const double hz = atomic_load_explicit(&_ui->lfo_inc[l], memory_order_relaxed) / 8388608.0 * 44100 / 384;
+   return fmin(fmax((hz - 4) / 8, 0), 1);
+}
+- (void)readRnd {
+   for (int l = 0; l < 3; ++l)
+      if ([self lfoFast:l] < 0.5)
+         for (int k = 0; k < 8; ++k) _rnd[l][k] = atomic_load_explicit(&_ui->lfo_rnd[l][k], memory_order_relaxed);
+}
+- (uint64_t)lfoSignature:(int)l {
+   const int wave = atomic_load_explicit(&_ui->lfo_wave[l], memory_order_relaxed);
+   const double fast = [self lfoFast:l];
+   uint64_t h = mix(mix(0, wave), atomic_load_explicit(&_ui->lfo_depth[l], memory_order_relaxed) == 0);
+   h = mix(mix(h, floor(fast * 16)), fast < 1 ? floor(atomic_load_explicit(&_ui->lfo_pos[l], memory_order_relaxed) / 8388608.0 * 52) : 0);
+   if (wave == 10)
+      for (int k = 0; k < 8; ++k) h = mix(h, _rnd[l][k]);
+   return h;
+}
+/* The wave over one cycle, drawn from its shape so it stays clean at any speed, on a zero
+ * line, with a dot where the LFO is now. Fast, the dot fades out and the wave glows. */
+- (void)drawLfo:(int)l in:(NSRect)g on:(BOOL)on {
+   CGContextRef ctx = NSGraphicsContext.currentContext.CGContext;
+   const int wave = atomic_load_explicit(&_ui->lfo_wave[l], memory_order_relaxed);
+   const double fast = [self lfoFast:l], x0 = g.origin.x, mid = NSMidY(g), half = g.size.height / 2 - 1.5;
+   CGContextSaveGState(ctx);
+   if (atomic_load_explicit(&_ui->lfo_depth[l], memory_order_relaxed) == 0) CGContextSetAlpha(ctx, 0.35);   /* DPTH 0: it moves nothing */
+   CGContextSetLineWidth(ctx, 1);
+   CGContextSetStrokeColorWithColor(ctx, C(LINE, 1).CGColor);
+   CGContextMoveToPoint(ctx, x0, mid);
+   CGContextAddLineToPoint(ctx, NSMaxX(g), mid);
+   CGContextStrokePath(ctx);
+   CGMutablePathRef path = CGPathCreateMutable();
+   enum { N = 104 };
+   for (int i = 0; i <= N; ++i) {
+      const double x = (double)i / N, y = mid - lfoShape(wave, fmin(x, 0.9999), _rnd[l]) * half;
+      if (i) CGPathAddLineToPoint(path, NULL, x0 + x * g.size.width, y); else CGPathMoveToPoint(path, NULL, x0, y);
+   }
+   CGContextSetLineJoin(ctx, kCGLineJoinRound);
+   CGContextSetLineCap(ctx, kCGLineCapRound);
+   if (fast > 0) {
+      CGContextAddPath(ctx, path);
+      CGContextSetLineWidth(ctx, 3.5);
+      CGContextSetStrokeColorWithColor(ctx, C(VALUE, 0.22 * fast).CGColor);
+      CGContextStrokePath(ctx);
+   }
+   CGContextAddPath(ctx, path);
+   CGContextSetLineWidth(ctx, 1.25);
+   CGContextSetStrokeColorWithColor(ctx, [C(on ? TEXT : MUTED, 1) blendedColorWithFraction:fast ofColor:C(VALUE, 1)].CGColor);
+   CGContextStrokePath(ctx);
+   CGPathRelease(path);
+   if (fast < 1) {
+      const double x = fmin(atomic_load_explicit(&_ui->lfo_pos[l], memory_order_relaxed) / 8388608.0, 0.9999);
+      const CGPoint p = CGPointMake(x0 + x * g.size.width, mid - lfoShape(wave, x, _rnd[l]) * half);
+      CGContextSetFillColorWithColor(ctx, C(VALUE, 1 - fast).CGColor);
+      CGContextFillEllipseInRect(ctx, CGRectMake(p.x - 2, p.y - 2, 4, 4));
+   }
+   CGContextRestoreGState(ctx);
+}
 - (uint64_t)signature:(const Ctl *)c {
    uint64_t h = 0xcbf29ce484222325ULL ^ (uint64_t)c->kind;
    switch (c->kind) {
    case C_TITLE: return mix(h, [self held] ? [self heldLocksInSection:c->section lfo:0] : 0);
-   case C_TAB: return mix(mix(h, c->id == _tab), [self held] ? [self heldLocksInSection:4 lfo:c->id] : 0);
+   case C_TAB: return mix(mix(mix(h, c->id == _tab), [self held] ? [self heldLocksInSection:4 lfo:c->id] : 0), [self lfoSignature:c->id]);
    case C_KNOB: case C_SLIDER: {
       const int ident = [self paramOf:c];
       const double b = [self shown:ident];
@@ -475,6 +558,7 @@ static uint64_t mix(uint64_t h, double x) {
       const uint32_t n = atomic_load_explicit(&_ui->notes[t], memory_order_relaxed);
       if (n != _noteSeen[t]) { _noteSeen[t] = n; _noteAt[t] = CACurrentMediaTime(); }
    }
+   [self readRnd];
    for (int i = 0; i < _n; ++i) {
       const uint64_t s = [self signature:&_c[i]];
       if (s != _sig[i]) { _sig[i] = s; [self setNeedsDisplayInRect:NSInsetRect(_c[i].r, -3, -3)]; }
