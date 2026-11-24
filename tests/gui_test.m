@@ -14,7 +14,7 @@
  *  - CPY and PST under a selected trig copy its trig and all its locks
  *  - a press on an LFO tab slides across the tabs; turning PAGE redraws DEST's name
  *  - each LFO tab graphs its LFO: a moving dot redraws it, a still or very fast LFO does not,
- *    and a very fast one's whole wave fades to pink */
+ *    a moving dot trails a blue plume, and a very fast LFO's whole wave fades to pink */
 #import <Cocoa/Cocoa.h>
 #include <dlfcn.h>
 #include <objc/runtime.h>
@@ -164,6 +164,19 @@ static void pixel(CGFloat x, CGFloat y, int c[3]) {
    [V cacheDisplayInRect:r toBitmapImageRep:rep];
    const unsigned char *q = rep.bitmapData + (rep.pixelsHigh / 2) * rep.bytesPerRow + (rep.pixelsWide / 2) * rep.bitsPerPixel / 8;
    for (int i = 0; i < 3; ++i) c[i] = q[i];
+}
+/* Pixels in a rect of the view that are clearly blue. */
+static int blue(NSRect r) {
+   [V setNeedsDisplay:YES];
+   NSBitmapImageRep *rep = [V bitmapImageRepForCachingDisplayInRect:r];
+   [V cacheDisplayInRect:r toBitmapImageRep:rep];
+   int n = 0;
+   for (NSInteger y = 0; y < rep.pixelsHigh; ++y)
+      for (NSInteger x = 0; x < rep.pixelsWide; ++x) {
+         const unsigned char *q = rep.bitmapData + y * rep.bytesPerRow + x * rep.bitsPerPixel / 8;
+         n += q[2] > 120 && q[2] > q[0] + 40;
+      }
+   return n;
 }
 /* A trackpad or wheel event. phase: 1 began, 2 changed, 4 ended, 128 may begin. momentum: 1 begin, 2 continue, 3 end. */
 static void scroll(CGFloat x, CGFloat y, int dy, int phase, int momentum, BOOL trackpad) {
@@ -472,6 +485,7 @@ int main(int argc, char **argv) {
       for (int i = 0; i < 20; ++i) { process(NULL, 0, false); pump(); }
       CHECK(redrawn(976 + 38, 30) && !redrawn(976 + 76 + 38, 30) && !redrawn(976 + 152 + 38, 30), "LFO tab redraws: %d %d %d",
             redrawn(976 + 38, 30), redrawn(976 + 76 + 38, 30), redrawn(976 + 152 + 38, 30));
+      CHECK(blue(NSMakeRect(1018, 18, 30, 24)) > 0, "LFO1's dot trails a blue plume");
       int peak[3];
       pixel(1172 + 6.5, 30 - 6.5, peak);   /* LFO3, too fast to follow: its whole wave pink (TRI's peak) */
       CHECK(peak[0] > 200 && peak[1] < 150 && peak[2] > 110, "LFO3's wave: %d %d %d", peak[0], peak[1], peak[2]);

@@ -37,7 +37,7 @@ column holds the track's settings, and the bottom row the 16 trigs. Pressing an
 LFO tab and sliding across the others switches to each one under the pointer.
 
 Each LFO tab shows its LFO: the wave it plays over one cycle, on a zero line,
-and a dot where it is now, trailing a short glowing plume. The wave is drawn from its shape rather than from
+and a dot where it is now, trailing a short light-blue plume. The wave is drawn from its shape rather than from
 samples, so it stays clean at any speed. RND shows its eight steps as they are
 played. From about 4 cycles a second, where a moving dot starts to flicker, the
 dot fades out and the whole wave fades to pink; from 12 the graph is pink and

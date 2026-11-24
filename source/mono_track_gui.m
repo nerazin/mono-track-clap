@@ -36,7 +36,7 @@ static NSColor *C(unsigned rgb, double a) {
 }
 enum : unsigned { BG = 0x141518, PANEL = 0x1d1f24, LINE = 0x31343c, TEXT = 0xd5d8df, MUTED = 0x858a96, VALUE = 0xeef1f6,
                   LOCK = 0xffb020, MOD = 0xb18cff, TRIG = 0xff453a, TRIGLESS = 0x32d74b, NOTE = 0x4cc9ff, DARK = 0x101114,
-                  FAST = 0xff5fa2 };   /* FAST: an LFO too quick for its graph's dot to follow */
+                  FAST = 0xff5fa2, PLUME = 0x8fd3ff };   /* an LFO too quick for its graph's dot to follow; the dot's plume */
 
 static void drawText(const char *s, NSRect r, CGFloat size, NSFontWeight w, NSColor *color, NSTextAlignment align) {
    NSMutableParagraphStyle *p = [NSMutableParagraphStyle new];
@@ -554,7 +554,7 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
                if (j == i * S / K || qx[j] < qx[j - 1]) CGContextMoveToPoint(ctx, q[j].x, q[j].y);   /* the cycle wraps */
                else CGContextAddLineToPoint(ctx, q[j].x, q[j].y);
             CGContextSetLineWidth(ctx, 1 + 3.5 * i / K);
-            CGContextSetStrokeColorWithColor(ctx, C(VALUE, 0.16 * trail).CGColor);
+            CGContextSetStrokeColorWithColor(ctx, C(PLUME, 0.16 * trail).CGColor);
             CGContextStrokePath(ctx);
          }
       }
