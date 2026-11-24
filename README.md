@@ -37,11 +37,11 @@ column holds the track's settings, and the bottom row the 16 trigs. Pressing an
 LFO tab and sliding across the others switches to each one under the pointer.
 
 Each LFO tab shows its LFO: the wave it plays over one cycle, on a zero line,
-and a dot where it is now. The wave is drawn from its shape rather than from
+and a dot where it is now, trailing a short glowing plume. The wave is drawn from its shape rather than from
 samples, so it stays clean at any speed. RND shows its eight steps as they are
-played. From about 4 cycles a second the dot turns pink and the wave lights
-up; from 12, where a moving dot would only flicker, the dot rests at the
-cycle's start and the graph holds still. With DPTH at 0 the graph is dimmed.
+played. From about 4 cycles a second, where a moving dot starts to flicker, the
+dot fades out and the whole wave fades to pink; from 12 the graph is pink and
+holds still. With DPTH at 0 the graph is dimmed.
 
 On a knob, the needle is the stored value. An amber arc goes to a lock sounding
 now, and a violet arc shows what the host's modulation adds.

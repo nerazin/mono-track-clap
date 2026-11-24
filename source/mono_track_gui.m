@@ -36,7 +36,7 @@ static NSColor *C(unsigned rgb, double a) {
 }
 enum : unsigned { BG = 0x141518, PANEL = 0x1d1f24, LINE = 0x31343c, TEXT = 0xd5d8df, MUTED = 0x858a96, VALUE = 0xeef1f6,
                   LOCK = 0xffb020, MOD = 0xb18cff, TRIG = 0xff453a, TRIGLESS = 0x32d74b, NOTE = 0x4cc9ff, DARK = 0x101114,
-                  FAST = 0xff5fa2 };   /* FAST: an LFO too quick for its graph to follow */
+                  FAST = 0xff5fa2 };   /* FAST: an LFO too quick for its graph's dot to follow */
 
 static void drawText(const char *s, NSRect r, CGFloat size, NSFontWeight w, NSColor *color, NSTextAlignment align) {
    NSMutableParagraphStyle *p = [NSMutableParagraphStyle new];
@@ -100,6 +100,9 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
    NSPoint _dragLast;
    int _scrollId;
    int8_t _rnd[3][8];   /* RND's steps as drawn: frozen while the LFO is too fast to follow */
+   double _fast[3];     /* how fast each LFO graph shows its LFO, eased (lfoHz) */
+   int32_t _seenPos[3];
+   NSTimeInterval _movedAt[3], _lfoTick;
    double _scrollValue;
    NSTimeInterval _scrollUntil;
    id _refresh;
@@ -461,36 +464,50 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
    default: return 2 * x - 1;
    }
 }
-/* How fast an LFO runs, from 0 (slow enough to follow its dot) to 1 (4 to 12 cycles a
- * second and up). At 60 frames a second a faster dot lands anywhere on the wave from one
- * frame to the next and only flickers, so the graph stops moving and changes colour instead. */
-- (double)lfoFast:(int)l {
-   const double hz = atomic_load_explicit(&_ui->lfo_inc[l], memory_order_relaxed) / 8388608.0 * 44100 / 384;
-   return fmin(fmax((hz - 4) / 8, 0), 1);
-}
-- (void)readRnd {
-   for (int l = 0; l < 3; ++l)
-      if ([self lfoFast:l] < 0.5)
+/* An LFO's speed in cycles a second, and how fast that is for its graph: 0 slow enough to
+ * follow the dot, rising to 1 from 4 to 12 cycles a second. At 60 frames a second a faster
+ * dot lands anywhere on the wave from one frame to the next and only flickers, so the dot
+ * fades out and the whole wave turns pink instead. */
+- (double)lfoHz:(int)l { return atomic_load_explicit(&_ui->lfo_inc[l], memory_order_relaxed) / 8388608.0 * 44100 / 384; }
+/* Once a frame: each graph's speed eases toward its LFO's (a fade of about a quarter of a
+ * second), the dot's last move is noted, and RND's steps are read while they can be followed. */
+- (void)followLfos {
+   const NSTimeInterval now = CACurrentMediaTime(), dt = fmin(now - _lfoTick, 0.1);
+   _lfoTick = now;
+   for (int l = 0; l < 3; ++l) {
+      const double target = fmin(fmax(([self lfoHz:l] - 4) / 8, 0), 1);
+      _fast[l] += (target - _fast[l]) * (1 - exp(-dt / 0.08));
+      if (fabs(target - _fast[l]) < 0.02) _fast[l] = target;
+      const int32_t pos = atomic_load_explicit(&_ui->lfo_pos[l], memory_order_relaxed);
+      if (pos != _seenPos[l]) { _seenPos[l] = pos; _movedAt[l] = now; }
+      if (_fast[l] < 0.5)
          for (int k = 0; k < 8; ++k) _rnd[l][k] = atomic_load_explicit(&_ui->lfo_rnd[l][k], memory_order_relaxed);
+   }
 }
+/* The dot's plume: full while it moves, gone 0.3 s after it stops. */
+- (double)lfoTrail:(int)l { return fmax(0, 1 - (CACurrentMediaTime() - _movedAt[l]) / 0.3); }
 - (uint64_t)lfoSignature:(int)l {
    const int wave = atomic_load_explicit(&_ui->lfo_wave[l], memory_order_relaxed);
-   const double fast = [self lfoFast:l];
    uint64_t h = mix(mix(0, wave), atomic_load_explicit(&_ui->lfo_depth[l], memory_order_relaxed) == 0);
-   h = mix(mix(h, floor(fast * 16)), fast < 1 ? floor(atomic_load_explicit(&_ui->lfo_pos[l], memory_order_relaxed) / 8388608.0 * 52) : 0);
+   h = mix(h, floor(_fast[l] * 32));
+   if (_fast[l] < 1)
+      h = mix(mix(h, floor(atomic_load_explicit(&_ui->lfo_pos[l], memory_order_relaxed) / 8388608.0 * 104)), floor([self lfoTrail:l] * 16));
    if (wave == 10)
       for (int k = 0; k < 8; ++k) h = mix(h, _rnd[l][k]);
    return h;
 }
 /* The wave over one cycle, drawn from its shape so it stays clean at any speed, on a zero
- * line, with a dot where the LFO is now. Fast, the dot turns pink and the wave glows; too
- * fast to follow, the dot rests at the cycle's start. */
+ * line, with a dot where the LFO is now trailing a comet's plume. Fast, the dot and plume
+ * fade out while the wave turns pink and glows. */
 - (void)drawLfo:(int)l in:(NSRect)g on:(BOOL)on {
    CGContextRef ctx = NSGraphicsContext.currentContext.CGContext;
    const int wave = atomic_load_explicit(&_ui->lfo_wave[l], memory_order_relaxed);
-   const double fast = [self lfoFast:l], x0 = g.origin.x, mid = NSMidY(g), half = g.size.height / 2 - 1.5;
+   const double fast = _fast[l], x0 = g.origin.x, w = g.size.width, mid = NSMidY(g), half = g.size.height / 2 - 1.5;
+   const int8_t *rnd = _rnd[l];
+   CGPoint (^at)(double) = ^(double x) { return CGPointMake(x0 + x * w, mid - lfoShape(wave, x, rnd) * half); };
+   const double alpha = atomic_load_explicit(&_ui->lfo_depth[l], memory_order_relaxed) == 0 ? 0.4 : 1;   /* DPTH 0: it moves nothing */
    CGContextSaveGState(ctx);
-   if (atomic_load_explicit(&_ui->lfo_depth[l], memory_order_relaxed) == 0) CGContextSetAlpha(ctx, 0.4);   /* DPTH 0: it moves nothing */
+   CGContextSetAlpha(ctx, alpha);
    CGContextSetLineWidth(ctx, 1);
    CGContextSetStrokeColorWithColor(ctx, C(MUTED, 0.5).CGColor);
    CGContextMoveToPoint(ctx, x0, mid);
@@ -499,28 +516,51 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
    CGMutablePathRef path = CGPathCreateMutable();
    enum { N = 104 };
    for (int i = 0; i <= N; ++i) {
-      const double x = (double)i / N, y = mid - lfoShape(wave, fmin(x, 0.9999), _rnd[l]) * half;
-      if (i) CGPathAddLineToPoint(path, NULL, x0 + x * g.size.width, y); else CGPathMoveToPoint(path, NULL, x0, y);
+      const CGPoint p = at(fmin((double)i / N, 0.9999));
+      if (i) CGPathAddLineToPoint(path, NULL, p.x, p.y); else CGPathMoveToPoint(path, NULL, p.x, p.y);
    }
    CGContextSetLineJoin(ctx, kCGLineJoinRound);
    CGContextSetLineCap(ctx, kCGLineCapRound);
    if (fast > 0) {
       CGContextAddPath(ctx, path);
       CGContextSetLineWidth(ctx, 3.5);
-      CGContextSetStrokeColorWithColor(ctx, C(VALUE, 0.22 * fast).CGColor);
+      CGContextSetStrokeColorWithColor(ctx, C(FAST, 0.3 * fast).CGColor);
       CGContextStrokePath(ctx);
    }
    CGContextAddPath(ctx, path);
    CGContextSetLineWidth(ctx, 1.5);
-   CGContextSetStrokeColorWithColor(ctx, [C(on ? VALUE : TEXT, 1) blendedColorWithFraction:fast ofColor:C(VALUE, 1)].CGColor);
+   CGContextSetStrokeColorWithColor(ctx, [C(on ? VALUE : TEXT, 1) blendedColorWithFraction:fast ofColor:C(FAST, 1)].CGColor);
    CGContextStrokePath(ctx);
    CGPathRelease(path);
-   const double x = fast < 1 ? fmin(atomic_load_explicit(&_ui->lfo_pos[l], memory_order_relaxed) / 8388608.0, 0.9999) : 0;
-   const CGPoint p = CGPointMake(x0 + x * g.size.width, mid - lfoShape(wave, x, _rnd[l]) * half);
-   CGContextSetFillColorWithColor(ctx, C(on ? PANEL : BG, 1).CGColor);   /* a ring of the tab's own colour sets the dot off the wave */
-   CGContextFillEllipseInRect(ctx, CGRectMake(p.x - 4, p.y - 4, 8, 8));
-   CGContextSetFillColorWithColor(ctx, [C(VALUE, 1) blendedColorWithFraction:fast ofColor:C(FAST, 1)].CGColor);
-   CGContextFillEllipseInRect(ctx, CGRectMake(p.x - 2.5, p.y - 2.5, 5, 5));
+   if (fast < 1) {
+      const double x = fmin(atomic_load_explicit(&_ui->lfo_pos[l], memory_order_relaxed) / 8388608.0, 0.9999);
+      const double trail = [self lfoTrail:l], tail = fmin(fmax(0.1 + [self lfoHz:l] * 0.12, 0.1), 0.45);
+      const CGPoint p = at(x);
+      CGContextSetAlpha(ctx, alpha * (1 - fast));
+      CGContextSetFillColorWithColor(ctx, C(on ? PANEL : BG, 1).CGColor);   /* a ring of the tab's own colour sets the dot off the wave */
+      CGContextFillEllipseInRect(ctx, CGRectMake(p.x - 3.75, p.y - 3.75, 7.5, 7.5));
+      if (trail > 0) {   /* the plume: strokes from ever nearer the dot, ever wider, adding up to a fading, widening tail */
+         enum { K = 12, S = 36 };
+         CGPoint q[S + 1];
+         double qx[S + 1];
+         for (int j = 0; j <= S; ++j) {
+            qx[j] = x - tail * (1 - (double)j / S);
+            if (qx[j] < 0) qx[j] += 1;
+            q[j] = at(qx[j]);
+         }
+         for (int i = 0; i < K; ++i) {
+            CGContextBeginPath(ctx);
+            for (int j = i * S / K; j <= S; ++j)
+               if (j == i * S / K || qx[j] < qx[j - 1]) CGContextMoveToPoint(ctx, q[j].x, q[j].y);   /* the cycle wraps */
+               else CGContextAddLineToPoint(ctx, q[j].x, q[j].y);
+            CGContextSetLineWidth(ctx, 1 + 3.5 * i / K);
+            CGContextSetStrokeColorWithColor(ctx, C(VALUE, 0.16 * trail).CGColor);
+            CGContextStrokePath(ctx);
+         }
+      }
+      CGContextSetFillColorWithColor(ctx, C(VALUE, 1).CGColor);
+      CGContextFillEllipseInRect(ctx, CGRectMake(p.x - 2.5, p.y - 2.5, 5, 5));
+   }
    CGContextRestoreGState(ctx);
 }
 - (uint64_t)signature:(const Ctl *)c {
@@ -560,7 +600,7 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
       const uint32_t n = atomic_load_explicit(&_ui->notes[t], memory_order_relaxed);
       if (n != _noteSeen[t]) { _noteSeen[t] = n; _noteAt[t] = CACurrentMediaTime(); }
    }
-   [self readRnd];
+   [self followLfos];
    for (int i = 0; i < _n; ++i) {
       const uint64_t s = [self signature:&_c[i]];
       if (s != _sig[i]) { _sig[i] = s; [self setNeedsDisplayInRect:NSInsetRect(_c[i].r, -3, -3)]; }

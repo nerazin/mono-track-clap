@@ -14,7 +14,7 @@
  *  - CPY and PST under a selected trig copy its trig and all its locks
  *  - a press on an LFO tab slides across the tabs; turning PAGE redraws DEST's name
  *  - each LFO tab graphs its LFO: a moving dot redraws it, a still or very fast LFO does not,
- *    and a very fast one's dot turns pink */
+ *    and a very fast one's whole wave fades to pink */
 #import <Cocoa/Cocoa.h>
 #include <dlfcn.h>
 #include <objc/runtime.h>
@@ -467,15 +467,14 @@ int main(int argc, char **argv) {
          clap_event_param_value_t e = {{sizeof e, 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0}, (clap_id)set[i].id, NULL, -1, -1, -1, -1, set[i].v};
          process(&e.header, 0, false);
       }
-      for (int i = 0; i < 8; ++i) process(NULL, 0, false);
-      pump();
+      for (int i = 0; i < 20; ++i) { process(NULL, 0, false); [NSThread sleepForTimeInterval:0.03]; pump(); }   /* the fades settle */
       ndirty = 0;
       for (int i = 0; i < 20; ++i) { process(NULL, 0, false); pump(); }
       CHECK(redrawn(976 + 38, 30) && !redrawn(976 + 76 + 38, 30) && !redrawn(976 + 152 + 38, 30), "LFO tab redraws: %d %d %d",
             redrawn(976 + 38, 30), redrawn(976 + 76 + 38, 30), redrawn(976 + 152 + 38, 30));
-      int dot[3];
-      pixel(1172, 30, dot);   /* LFO3's dot, too fast to follow: pink, at the cycle's start */
-      CHECK(dot[0] > 200 && dot[1] < 150 && dot[2] > 110, "LFO3's dot: %d %d %d", dot[0], dot[1], dot[2]);
+      int peak[3];
+      pixel(1172 + 6.5, 30 - 6.5, peak);   /* LFO3, too fast to follow: its whole wave pink (TRI's peak) */
+      CHECK(peak[0] > 200 && peak[1] < 150 && peak[2] > 110, "LFO3's wave: %d %d %d", peak[0], peak[1], peak[2]);
       for (unsigned i = 0; i < sizeof set / sizeof set[0]; ++i) {
          clap_event_param_value_t e = {{sizeof e, 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0}, (clap_id)set[i].id, NULL, -1, -1, -1, -1, set[i].back};
          process(&e.header, 0, false);
