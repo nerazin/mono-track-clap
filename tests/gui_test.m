@@ -232,6 +232,20 @@ int main(int argc, char **argv) {
    CHECK(V, "the editor view");
    shot(dir, "1_default");
 
+   /* a press on an LFO tab slides across the tabs; leaving them keeps the last */
+   mouse(NSEventTypeLeftMouseDown, 976 + 30, 30, 0, 1);
+   mouse(NSEventTypeLeftMouseDragged, 976 + 76 + 30, 30, 0, 1);
+   mouse(NSEventTypeLeftMouseDragged, 976 + 152 + 30, 30, 0, 1);
+   mouse(NSEventTypeLeftMouseDragged, 976 + 152 + 30, 120, 0, 1);
+   mouse(NSEventTypeLeftMouseUp, 976 + 152 + 30, 120, 0, 1);
+   pump();
+   drag(kx(4, 5), ky(5), -25);
+   CHECK(val(P_LFO + 16 + 5) > 64 && val(P_LFO + 5) == 64 && val(P_LFO + 8 + 5) == 64, "the slide ends on LFO3: %g", val(P_LFO + 16 + 5));
+   mouse(NSEventTypeLeftMouseDown, kx(4, 5), ky(5), 0, 2);   /* double-click: back to the default */
+   mouse(NSEventTypeLeftMouseUp, kx(4, 5), ky(5), 0, 2);
+   CHECK(val(P_LFO + 16 + 5) == 64, "LFO3 SPD reset");
+   click(976 + 30, 30);
+
    /* a click toggles a trig */
    click(padx(0), PADY);
    CHECK(trigs() == 1, "click sets: %x", trigs());

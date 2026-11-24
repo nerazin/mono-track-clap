@@ -607,7 +607,7 @@ static uint64_t mix(uint64_t h, double x) {
       [self padDown:c->id];
       _dragCtl = i;
       break;
-   case C_TAB: _tab = c->id; break;
+   case C_TAB: _tab = c->id; _dragCtl = i; break;
    case C_KEYS: [self setKeys:!_keys]; break;
    case C_SWITCH: mt_ui_set(_p, c->id, [self base:c->id] >= 0.5 ? 0 : 1); break;
    case C_COPY: case C_PASTE:
@@ -650,8 +650,13 @@ static uint64_t mix(uint64_t h, double x) {
 }
 - (void)mouseDragged:(NSEvent *)e {
    [self checkHolds];
-   if (_dragId < 0) return;
    const NSPoint pt = [self convertPoint:e.locationInWindow fromView:nil];
+   if (_dragCtl >= 0 && _c[_dragCtl].kind == C_TAB) {   /* a press on a tab selects whichever tab it slides onto */
+      const int i = [self hit:pt];
+      if (i >= 0 && _c[i].kind == C_TAB && _c[i].id != _tab) { _tab = _c[i].id; [self tick:nil]; }
+      return;
+   }
+   if (_dragId < 0) return;
    const clap_param_info_t *info = &_info[_dragId];
    const double range = info->max_value - info->min_value, fine = e.modifierFlags & NSEventModifierFlagShift ? 0.1 : 1;
    const double delta = _c[_dragCtl].kind == C_SLIDER ? (pt.x - _dragLast.x) * range / _c[_dragCtl].r.size.width

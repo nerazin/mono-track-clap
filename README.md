@@ -33,7 +33,8 @@ editor window with 16 trigs and parameter locks.
 ## The editor
 
 The top row is the unit's data pages: SYN, AMP, FILT, EFX and LFO1-3. The right
-column holds the track's settings, and the bottom row the 16 trigs.
+column holds the track's settings, and the bottom row the 16 trigs. Pressing an
+LFO tab and sliding across the others switches to each one under the pointer.
 
 On a knob, the needle is the stored value. An amber arc goes to a lock sounding
 now, and a violet arc shows what the host's modulation adds.
