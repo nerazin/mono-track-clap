@@ -33,11 +33,11 @@ editor window with a pattern of up to 64 steps, with trigs and parameter locks.
 ## The editor
 
 The top row is the unit's data pages: SYN, AMP, FILT, EFX and LFO1-3. The right
-column holds the track's settings, and the bottom row 16 trigs: one page of the
+column holds the track's settings, including VEL and KEY SETUP, and the bottom row 16 trigs: one page of the
 pattern. Pressing an
 LFO tab and sliding across the others switches to each one under the pointer.
 The top-left corner shows, faintly, the name, the version and the commit the
-build came from, such as `Mono Track 0.5.4 (ff94ab5)`. A `+` after the commit marks a build with
+build came from, such as `Mono Track 0.6.0 (ff94ab5)`. A `+` after the commit marks a build with
 uncommitted changes.
 
 Each LFO tab shows its LFO: the wave it plays over one cycle, on a zero line,
@@ -64,7 +64,23 @@ filter envelope and the LFOs, and ends locks.
 | **CPY** / **PST** under a selected trig | Copy the step's trig and all its locks, or replace this step with the copy. A trig is selected by a right-click latch or a held key. PST is gray until something is copied, and CPY is gray on an empty step. The copy lasts while the plug-in is loaded and is not saved with the project. |
 | **CLR LOCKS** | Remove all locks from the held steps |
 | **NOTE ENDS** (on by default) | A MIDI note ends the locks of earlier steps. Off, only a trig or Stop ends them, as on the unit. |
-| **KEYBOARD** on (off by default) | `12345678` and `QWERTYUI` act as the 16 trigs of the page shown: tap to toggle, hold to edit. They follow the key's position, so any keyboard layout works. Other keys stay with the host. |
+| **KEYBOARD CAPTURE** on (off by default) | `12345678` and `QWERTYUI` act as the 16 trigs of the page shown: tap to toggle, hold to edit. They follow the key's position, so any keyboard layout works. Other keys stay with the host. |
+
+**VEL** and **KEY SETUP** are the unit's KIT ASSIGN window, its KEY VEL and KEY
+TRK tabs. Each opens a small window over the LFO page with two rows of **PAGE**,
+**DEST** and **ADD**. KEY's also has **HPF** and **LPF**, the filters' key
+tracking. Click SETUP again, the ×, or anywhere outside the window to close it.
+While a window is open, the rest of the editor ignores the mouse.
+
+Each row adds the note's velocity (VEL) or note number (KEY), times ADD, to the
+parameter that PAGE and DEST pick, as the unit does:
+- **PAGE and DEST** read as an LFO's. PTCH's DEST is the range.
+- **ADD** runs from −64 to +63. At velocity or note 127 and ADD +63 a parameter
+  moves 125 steps, and PTCH moves by about its range: 1/12 is +1.007 semitones.
+- **Defaults** are a cleared kit's: VEL row 1 on AMP VOL, KEY row 1 on the
+  first SYN knob, both rows 2 on PTCH 1/12, all at ADD 0, so nothing changes
+  until ADD is turned. HPF and LPF are on.
+- **POLY:** each voice uses its own note's velocity and key.
 
 **SCALE** sets up the pattern, as the unit's SCALE key and SCALE SETUP window do.
 A pattern has 2 to 64 steps in pages of 16, and the pads show one page.
@@ -199,8 +215,11 @@ LFO speed, HOLD, the portamento and the delay time all follow the host's tempo.
 The TRACK page:
 
 - **LEVEL** is the track's level.
-- **LP KEY** and **HP KEY** are the kit's key-tracking switches (KIT ASSIGN KEY:
-  LPF and HPF), both on by default.
+- **LP KEY** and **HP KEY** are the kit's key-tracking switches, LPF and HPF in
+  KEY SETUP, both on by default.
+
+KIT ASSIGN's twelve rows (VEL 1 PAGE … KEY 2 ADD) are host parameters too, in
+the module ASSIGN, but on no remote-control page.
 - **BEND** is the range of MIDI pitch bend, 1/12 to 16OC, sent as KIT ASSIGN
   JOY R/L would be with PAGE PTCH.
 - **MASTER TUNE** is 400.0–499.9 Hz.
@@ -209,7 +228,10 @@ The TRACK page:
 ## How it behaves
 
 - **Notes.** One voice. The last note held wins, and releasing it returns to
-  the previous note still held, with a new trig.
+  the previous note still held, with a new trig. Each note-on sets KIT ASSIGN's
+  velocity and key, legato notes too, and a return to a held note sets the key
+  to that note, as the unit does. A note's velocity is the host's, × 127,
+  rounded.
 - **POLY.** As on the unit, each of the six voices is a whole track, with its
   own envelopes, LFO phases, delay line and SRR. Notes go through a port of the
   firmware's allocator: a free voice that last played the pitch, otherwise the
@@ -253,8 +275,8 @@ The TRACK page:
   NOTE ENDS off for that). Not included: step pitch, note-off trigs, separate
   AMP/FILT/LFO trig tracks per step, swing, slide, page copy, paste and clear,
   rotating trigs, song mode's offset and length per row, the arpeggiator, MULTI
-  TRIG transpose, and KIT ASSIGN other than pitch bend (velocity, key position,
-  the joystick's vertical axis).
+  TRIG transpose, and KIT ASSIGN's joystick tabs other than pitch bend (the
+  vertical axis, MIRR, their second rows).
 - **Where a pattern starts.** The unit starts a pattern at step 1 when PLAY is
   pressed. Here the step follows the host's song position, counted from the
   start of the song.
@@ -283,6 +305,7 @@ The TRACK page:
 | The playhead with length and speed changing at random (which step runs at each clock, and the counter's state) | the main OS's clock routine, the same way | 1.6 M clocks, 345,104 steps, 64,254 changes | 0 differ |
 | Which page a longer length fills, and from where | the main OS's length setter | 160,000 lengths, 29,821 fills | 0 differ |
 | The page fill: trigs ORed in, locks copied | the main OS's page copy | 3,200 copies | 0 differ |
+| KIT ASSIGN's VEL and KEY rows: the setter, the note-on's controllers, the undo and the apply each frame | the main OS's own code in a 68020 emulator | 400,000 frames, 8,105 row edits, 19,952 notes | 0 differ |
 | Regression hashes (`tests/test_core.c`) | hashes from the firmware | every machine | pass |
 | FM+ DYN's 1FRQ and 2FRQ texts | the main OS's display strings | 256 values | 0 differ |
 
@@ -302,7 +325,10 @@ The TRACK page:
 - The plug-in's own page fill (the editor's LEN and page buttons) is checked by
   the editor test, not against the firmware. The firmware checks cover the rule
   it follows and what a fill copies.
-- The 64-step pattern has not been tried by hand in Bitwig yet.
+- The 64-step pattern and the VEL and KEY SETUP windows have not been tried by
+  hand in Bitwig yet.
+- Velocity and key were not compared with the unit's own keyboard, whose
+  velocity curve (VELOCITY CURVE in the global settings) comes before them.
 - The main CPU's and DSP's relative timing (which of a frame's three blocks a
   new word reaches first) follows the emulator's host model. It can shift
   modulation by up to about 1 ms.
@@ -328,8 +354,8 @@ xcrun clang -std=c11 -O1 -fobjc-arc -w -I vendor/clap/include tests/gui_test.m -
 ```
 
 `test_core` needs no firmware. `clap_test` loads the bundle and checks its
-pages, parameters, state (including states saved by 0.1.0, 0.2.0 and 0.4, which load as 16 steps at 1X), each
-section's effect on the sound, POLY, the MIDI TRIG switches, trigs and locks. `gui_test` opens the
+pages, parameters, state (including states saved by 0.1.0, 0.2.0 and 0.4, which load as 16 steps at 1X, and
+0.5, which load KIT ASSIGN as a cleared kit), each section's effect on the sound, velocity and key through KIT ASSIGN, POLY, the MIDI TRIG switches, trigs and locks. `gui_test` opens the
 editor off-screen and drives it with mouse and key events. All three also pass
 under AddressSanitizer and UBSan and as an Intel build under Rosetta, and the
 bundle passes `clap-trap` at 44.1, 48 and 96 kHz.

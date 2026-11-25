@@ -27,11 +27,11 @@
 #include <time.h>
 
 #define CHECK(c, ...) do { if (!(c)) { printf("FAIL line %d: ", __LINE__); printf(__VA_ARGS__); puts(""); exit(1); } } while (0)
-#define NPARAM 66
+#define NPARAM 78
 #define PAT (8 + 8 * NPARAM)
 #define STATE_SIZE (PAT + 10 + 64 * 56)
 #define N 88200
-enum { SYN = 0, AMP = 8, FILT = 16, EFX = 24, LFO = 32, LEVEL = 56, LPKEY, HPKEY, BEND, MTUNE, POLY, TRIG_SYN, TRIG_FILT, TRIG_LFO, LOCK_END };
+enum { SYN = 0, AMP = 8, FILT = 16, EFX = 24, LFO = 32, LEVEL = 56, LPKEY, HPKEY, BEND, MTUNE, POLY, TRIG_SYN, TRIG_FILT, TRIG_LFO, LOCK_END, ASSIGN };   /* ASSIGN: VEL 1, VEL 2, KEY 1, KEY 2, each PAGE DEST ADD */
 static const char *const ids[8] = {"sin", "nois", "saw", "puls", "ens", "fmstat", "fmpar", "fmdyn"};
 
 typedef union { clap_event_header_t h; clap_event_param_value_t v; clap_event_note_t n; } Event;
@@ -63,7 +63,8 @@ static void set_params(const clap_plugin_t *p, const Set *set, int n) {
       ev.v[ev.n++].v = (clap_event_param_value_t){{sizeof ev.v[0].v, 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0}, (clap_id)set[i].id, NULL, -1, -1, -1, -1, set[i].v};
    params->flush(p, &ev.api, NULL);
 }
-/* A note from frame 100 for `hold` frames; the output, frame by frame. */
+/* A note from frame 100 for `hold` frames, at this velocity; the output, frame by frame. */
+static double note_vel = 1.0;
 static void render(int m, const Set *set, int nset, int key, int hold, double rate, float *l, float *r, int frames) {
    const clap_plugin_t *p = create(m);
    set_params(p, set, nset);
@@ -78,7 +79,7 @@ static void render(int m, const Set *set, int nset, int key, int hold, double ra
       const int n = frames - at < 512 ? frames - at : 512;
       ev.n = 0;
       if (at <= 100 && 100 < at + n)
-         ev.v[ev.n++].n = (clap_event_note_t){{sizeof ev.v[0].n, (uint32_t)(100 - at), CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_NOTE_ON, 0}, -1, 0, 0, (int16_t)key, 1.0};
+         ev.v[ev.n++].n = (clap_event_note_t){{sizeof ev.v[0].n, (uint32_t)(100 - at), CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_NOTE_ON, 0}, -1, 0, 0, (int16_t)key, note_vel};
       if (at <= 100 + hold && 100 + hold < at + n)
          ev.v[ev.n++].n = (clap_event_note_t){{sizeof ev.v[0].n, (uint32_t)(100 + hold - at), CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_NOTE_OFF, 0}, -1, 0, 0, (int16_t)key, 0.0};
       float *data[2] = {l + at, r + at};
@@ -283,9 +284,35 @@ int main(int argc, char **argv) {
       CHECK(pa->value_to_text(p, LFO + 1, 7, t, sizeof t) && !strcmp(t, "DPTH"), "LFO dest: %s", t);
       set_params(p, (Set[]){{LFO, 8}}, 1);
       CHECK(pa->value_to_text(p, LFO + 1, 0, t, sizeof t) && !strcmp(t, "LEN"), "MIDI dest: %s", t);
+      /* KIT ASSIGN: a cleared kit's rows, their names, and DEST read on its row's PAGE */
+      {
+         static const double def[12] = {2, 5, 64, 0, 0, 64, 1, 0, 64, 0, 0, 64};
+         static const char *const names[12] = {"VEL 1 PAGE", "VEL 1 DEST", "VEL 1 ADD", "VEL 2 PAGE", "VEL 2 DEST", "VEL 2 ADD",
+                                               "KEY 1 PAGE", "KEY 1 DEST", "KEY 1 ADD", "KEY 2 PAGE", "KEY 2 DEST", "KEY 2 ADD"};
+         for (int i = 0; i < 12; ++i) {
+            clap_param_info_t info;
+            double x;
+            CHECK(pa->get_info(p, ASSIGN + i, &info) && !strcmp(info.name, names[i]) && !strcmp(info.module, "ASSIGN"), "ASSIGN %d: %s", i, info.name);
+            CHECK(info.default_value == def[i] && pa->get_value(p, ASSIGN + i, &x) && x == def[i], "ASSIGN %d default", i);
+            CHECK((info.flags & CLAP_PARAM_IS_STEPPED) && !(info.flags & CLAP_PARAM_IS_MODULATABLE), "ASSIGN %d flags", i);
+            CHECK(info.max_value == (i % 3 == 0 ? 8 : i % 3 == 1 ? 7 : 127), "ASSIGN %d range", i);
+         }
+         CHECK(pa->value_to_text(p, ASSIGN, 2, t, sizeof t) && !strcmp(t, "AMP"), "VEL 1 PAGE: %s", t);
+         CHECK(pa->value_to_text(p, ASSIGN + 1, 5, t, sizeof t) && !strcmp(t, "VOL"), "VEL 1 DEST: %s", t);
+         CHECK(pa->value_to_text(p, ASSIGN + 7, 0, t, sizeof t) && !strcmp(t, "UNIL"), "KEY 1 DEST on SYNT: %s", t);
+         CHECK(pa->value_to_text(p, ASSIGN + 10, 3, t, sizeof t) && !strcmp(t, "1OCT"), "KEY 2 DEST on PTCH: %s", t);
+         CHECK(pa->value_to_text(p, ASSIGN + 2, 0, t, sizeof t) && !strcmp(t, "-64"), "ADD -64: %s", t);
+         CHECK(pa->value_to_text(p, ASSIGN + 2, 127, t, sizeof t) && !strcmp(t, "+63"), "ADD +63: %s", t);
+         double v;
+         CHECK(pa->text_to_value(p, ASSIGN + 2, "-10", &v) && v == 54, "typed ADD");
+         CHECK(pa->text_to_value(p, ASSIGN + 6, "lfo2", &v) && v == 6, "typed PAGE");
+         set_params(p, (Set[]){{ASSIGN + 6, 4}}, 1);
+         CHECK(pa->value_to_text(p, ASSIGN + 7, 3, t, sizeof t) && !strcmp(t, "DTIM"), "KEY 1 DEST on EFFX: %s", t);
+         set_params(p, (Set[]){{ASSIGN + 6, 1}}, 1);
+      }
 
       /* state */
-      set_params(p, (Set[]){{SYN, 33}, {FILT + 1, 77}, {EFX + 3, 21}, {LFO + 8 + 3, 5}, {LEVEL, 90}, {HPKEY, 0}}, 6);
+      set_params(p, (Set[]){{SYN, 33}, {FILT + 1, 77}, {EFX + 3, 21}, {LFO + 8 + 3, 5}, {LEVEL, 90}, {HPKEY, 0}, {ASSIGN + 2, 100}, {ASSIGN + 9, 7}}, 8);
       Buffer b = {{0}, 0, 0};
       clap_ostream_t os = {&b, buf_write};
       clap_istream_t is = {&b, buf_read};
@@ -326,7 +353,7 @@ int main(int argc, char **argv) {
          CHECK(!sq->load(q, &ia), "a short state");
          /* states saved by 0.2.0 (65 parameters) and 0.3/0.4 (66): a 16-step pattern, two trig bytes */
          for (int version = 2; version <= 3; ++version) {
-            const int count = version == 2 ? 65 : NPARAM;
+            const int count = version == 2 ? 65 : ASSIGN;
             Buffer old = {{0}, 0, 0}, back = {{0}, 0, 0};
             clap_ostream_t ov = {&old, buf_write}, ob = {&back, buf_write};
             clap_istream_t iv = {&old, buf_read};
@@ -359,6 +386,24 @@ int main(int argc, char **argv) {
          Buffer d = {{0}, 0, 0};
          clap_ostream_t od = {&d, buf_write};
          CHECK(sq->save(q, &od) && !memcmp(d.data + PAT, a.data + PAT, 10 + 64 * 56), "64 steps round trip");
+         /* a state saved by 0.5: 66 parameters and 64 steps; KIT ASSIGN's rows come back as a cleared kit's */
+         {
+            Buffer v4 = {{0}, 0, 0};
+            clap_istream_t i4 = {&v4, buf_read};
+            memcpy(v4.data, a.data, 8 + 8 * ASSIGN);
+            memcpy(v4.data + 8 + 8 * ASSIGN, a.data + PAT, 10 + 64 * 56);
+            v4.data[7] = 4;
+            v4.size = 8 + 8 * ASSIGN + 10 + 64 * 56;
+            CHECK(sq->load(q, &i4), "load a 0.5 state");
+            pq->get_value(q, ASSIGN + 2, &x); CHECK(x == 64, "0.5: VEL 1 ADD default");
+            pq->get_value(q, ASSIGN + 9, &x); CHECK(x == 0, "0.5: KEY 2 PAGE default");
+            pq->get_value(q, HPKEY, &x); CHECK(x == 0, "0.5: HP KEY kept");
+            Buffer e = {{0}, 0, 0};
+            clap_ostream_t oe = {&e, buf_write};
+            CHECK(sq->save(q, &oe) && e.data[7] == 5 && !memcmp(e.data + PAT, a.data + PAT, 10 + 64 * 56), "0.5 pattern kept");
+            v4.pos = 0; v4.size--;
+            CHECK(!sq->load(q, &i4), "a short 0.5 state");
+         }
       }
       q->destroy(q);
       p->destroy(p);
@@ -403,6 +448,29 @@ int main(int argc, char **argv) {
       render(2, off, 2, 96, 66150, 44100, l, r, N);
       CHECK(rms(base_l, 2000, 30000) > 2 * rms(l, 2000, 30000), "LP KEY: %g vs %g", rms(base_l, 2000, 30000), rms(l, 2000, 30000));
    }
+   /* KIT ASSIGN: velocity and key move their rows' targets, and do nothing at ADD 0 (the default) */
+   {
+      note_vel = 0.25;
+      render(2, NULL, 0, 60, 22050, 44100, base_l, base_r, N);
+      note_vel = 1.0;
+      render(2, NULL, 0, 60, 22050, 44100, l, r, N);
+      CHECK(!memcmp(base_l, l, sizeof l), "velocity changed the sound at ADD 0");
+      const Set vel[1] = {{ASSIGN + 2, 127}};   /* VEL 1: AMP VOL, ADD +63 */
+      static float soft[N], loud[N], tmp[N];
+      note_vel = 0.25;
+      render(2, vel, 1, 60, 22050, 44100, soft, tmp, N);
+      note_vel = 1.0;
+      render(2, vel, 1, 60, 22050, 44100, loud, tmp, N);
+      const double r0 = rms(l, 2000, 20000), r1 = rms(soft, 2000, 20000), r2 = rms(loud, 2000, 20000);
+      CHECK(r2 > 1.2 * r1 && r1 > 1.2 * r0, "VEL to VOL: %g %g %g", r0, r1, r2);
+      /* KEY 2 on PTCH 1OCT, ADD +63: note 60 adds 60 x 63 x 48 to word 30, 0.48 octave */
+      const Set key[3] = {{ASSIGN + 10, 3}, {ASSIGN + 11, 127}, {AMP + 2, 127}}, plain[1] = {{AMP + 2, 127}};
+      render(0, plain, 1, 60, 30000, 44100, base_l, base_r, N);
+      render(0, key, 3, 60, 30000, 44100, l, r, N);
+      const double ratio = (double)crossings(l, 4000, 28000) / crossings(base_l, 4000, 28000);
+      CHECK(fabs(ratio - pow(2, 60 * 63 * 48 / 65536.0 * 352 / 2048)) < 0.02, "KEY to PTCH: ratio %g", ratio);
+   }
+
    /* LFOs: one on the filter moves the sound; another on the first one's depth changes that */
    {
       const Set still[2] = {{AMP + 2, 127}, {FILT + 1, 50}};   /* DEC 127 holds the note, so only the LFO moves it */

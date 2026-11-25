@@ -24,9 +24,11 @@
 #endif
 
 /* Plug-ins share one host process, and Objective-C classes one namespace: the version keeps builds apart. */
-#define MTEditorView MonoTrackEditorView_0_5_4
+#define MTEditorView MonoTrackEditorView_0_6_0
 
-enum { C_TITLE, C_KNOB, C_TAB, C_SLIDER, C_SWITCH, C_KEYS, C_PAD, C_CLEAR, C_COPY, C_PASTE, C_LEN, C_SPEED, C_PAGE, C_MAX = 128 };
+enum { C_TITLE, C_KNOB, C_TAB, C_SLIDER, C_SWITCH, C_KEYS, C_PAD, C_CLEAR, C_COPY, C_PASTE, C_LEN, C_SPEED, C_PAGE, C_SETUP, C_CLOSE, C_MAX = 160 };
+/* Controls of the setup windows have these sections: KIT ASSIGN's KEY VEL and KEY TRK tabs. */
+enum { S_VEL = 5, S_KEY = 6 };
 typedef struct { int kind, id, section; NSRect r; const char *label; } Ctl;
 
 static const char *const kSection[5] = {"SYN", "AMP", "FILT", "EFX", "LFO"};
@@ -101,6 +103,7 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
    NSTimeInterval _downAt[16], _noteAt[UI_STEPS];
    uint32_t _noteSeen[UI_STEPS];
    int _page;           /* the page the pads show */
+   int _setup;          /* the setup window open: 0 VEL, 1 KEY, -1 none */
    double _lenValue;    /* LEN's drag or scroll, between whole steps */
    int _dragCtl, _dragId;
    BOOL _dragMoved, _dragGesture, _scrollIsLock, _scrollDead;
@@ -133,7 +136,7 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
    _ui = ui;
    _params = plugin->get_extension(plugin, CLAP_EXT_PARAMS);
    for (int i = 0; i < NPARAM; ++i) _params->get_info(plugin, (clap_id)i, &_info[i]);
-   _dragCtl = _dragId = _scrollId = _flashCtl = -1;
+   _dragCtl = _dragId = _scrollId = _flashCtl = _setup = -1;
 
    for (int s = 0; s < 5; ++s) {
       const CGFloat x = 16 + 240 * s;
@@ -149,12 +152,12 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
    CGFloat ry = 12;
    const CGFloat rowH = 53;
    [self add:C_SLIDER id:P_LEVEL section:0 rect:NSMakeRect(rx, ry, rw, 44) label:"TRK LV"]; ry += rowH;
-   [self add:C_SWITCH id:P_LPKEY section:0 rect:NSMakeRect(rx, ry, rw, 44) label:"LP KEY"]; ry += rowH;
-   [self add:C_SWITCH id:P_HPKEY section:0 rect:NSMakeRect(rx, ry, rw, 44) label:"HP KEY"]; ry += rowH;
+   [self add:C_SETUP id:0 section:0 rect:NSMakeRect(rx, ry, rw, 44) label:"VEL"]; ry += rowH;
+   [self add:C_SETUP id:1 section:0 rect:NSMakeRect(rx, ry, rw, 44) label:"KEY"]; ry += rowH;
    [self add:C_SLIDER id:P_BEND section:0 rect:NSMakeRect(rx, ry, rw, 44) label:"BEND"]; ry += rowH;
    [self add:C_SLIDER id:P_MTUNE section:0 rect:NSMakeRect(rx, ry, rw, 44) label:"MAST TUN"]; ry += rowH;
    [self add:C_SWITCH id:P_POLY section:0 rect:NSMakeRect(rx, ry, rw, 44) label:"POLY"]; ry += rowH;
-   [self add:C_KEYS id:0 section:0 rect:NSMakeRect(rx, ry, rw, 44) label:"KEYBOARD"];
+   [self add:C_KEYS id:0 section:0 rect:NSMakeRect(rx, ry, rw, 44) label:"KEYBOARD CAPTURE"];
 
    for (int i = 0; i < 16; ++i) {
       const CGFloat cx = i < 8 ? 43 + 54 * i : 505 + 54 * (i - 8);
@@ -171,6 +174,17 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
    [self add:C_SPEED id:0 section:0 rect:NSMakeRect(988, 346, 38, 26) label:NULL];
    static const char *const pages[4] = {"1", "2", "3", "4"};
    for (int k = 0; k < 4; ++k) [self add:C_PAGE id:k section:0 rect:NSMakeRect(1030 + 24 * k, 346, 22, 26) label:pages[k]];
+   /* the setup windows, as the unit's ASSIGN window lays out its tabs: rows 1 and 2 of PAGE DEST ADD; KEY TRK adds HPF and LPF */
+   for (int w = 0; w < 2; ++w) {
+      const NSRect r = [self setupRect:w];
+      for (int k = 0; k < 6; ++k)
+         [self add:C_KNOB id:P_ASSIGN + 6 * w + k section:S_VEL + w
+              rect:NSMakeRect(r.origin.x + 8 + 54 * (k % 3), r.origin.y + 30 + 100 * (k / 3), 54, 100) label:NULL];
+      [self add:C_CLOSE id:w section:S_VEL + w rect:NSMakeRect(NSMaxX(r) - 28, r.origin.y + 4, 22, 22) label:NULL];
+   }
+   const NSRect key = [self setupRect:1];
+   [self add:C_SWITCH id:P_HPKEY section:S_KEY rect:NSMakeRect(key.origin.x + 180, key.origin.y + 58, 64, 44) label:"HPF"];
+   [self add:C_SWITCH id:P_LPKEY section:S_KEY rect:NSMakeRect(key.origin.x + 180, key.origin.y + 158, 64, 44) label:"LPF"];
    return self;
 }
 
@@ -183,6 +197,10 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
 - (int)playing { return atomic_load_explicit(&_ui->step, memory_order_relaxed); }
 - (int)paramOf:(const Ctl *)c { return c->kind == C_KNOB && c->section == 4 ? P_LFO + _tab * 8 + c->id : c->id; }
 - (double)base:(int)ident { double v = 0; _params->get_value(_p, (clap_id)ident, &v); return v; }
+/* A setup window, over the LFO page, its right edge by the track column. */
+- (NSRect)setupRect:(int)w { const CGFloat width = w ? 254 : 178; return NSMakeRect(1214 - width, 34, width, 232); }   /* down to the panels' bottom */
+/* Whether a control is on screen: a setup window's only while it is open. */
+- (BOOL)visible:(const Ctl *)c { return c->section < S_VEL || c->section - S_VEL == _setup; }
 - (int)lockAt:(int)step id:(int)ident { return atomic_load_explicit(&_ui->lock[step][ident], memory_order_relaxed); }
 /* The first held step's lock on this parameter, or -1. */
 - (int)heldLock:(int)ident {
@@ -245,10 +263,25 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
    drawText("SCALE", NSMakeRect(936, 330, 188, 14), 10, NSFontWeightMedium, C(MUTED, 1), NSTextAlignmentLeft);
    char about[64];   /* barely there: the version and the commit it was built from */
    snprintf(about, sizeof about, "Mono Track %s (%s)", _p->desc->version, MT_COMMIT);
-   drawText(about, NSMakeRect(16, 2, 300, 12), 9, NSFontWeightRegular, C(MUTED, 0.4), NSTextAlignmentLeft);   /* above SYN, clear of the pads' CPY/PST */
-   for (int i = 0; i < _n; ++i) {
-      const Ctl *c = &_c[i];
-      if (![self needsToDrawRect:NSInsetRect(c->r, -3, -3)]) continue;
+   drawText(about, NSMakeRect(16, 2, 300, 12), 9, NSFontWeightRegular, C(MUTED, 0.3), NSTextAlignmentLeft);   /* above SYN, clear of the pads' CPY/PST */
+   for (int i = 0; i < _n; ++i)
+      if (_c[i].section < S_VEL) [self drawCtl:i context:g];
+   if (_setup < 0) return;
+   const NSRect w = [self setupRect:_setup];
+   if (![self needsToDrawRect:NSInsetRect(w, -6, -6)]) return;
+   fillRound(NSOffsetRect(NSInsetRect(w, -2, -2), 0, 3), 10, C(DARK, 0.7));   /* a shadow, so the window reads as on top */
+   fillRound(w, 8, C(PANEL, 1));
+   strokeRound(w, 8, 1, C(MUTED, 1));
+   drawText(_setup ? "KEY SETUP" : "VEL SETUP", NSMakeRect(w.origin.x + 12, w.origin.y + 8, 140, 15), 11, NSFontWeightSemibold, C(TEXT, 1), NSTextAlignmentLeft);
+   [C(LINE, 1) setFill];
+   NSRectFill(NSMakeRect(w.origin.x + 1, w.origin.y + 29, w.size.width - 2, 1));
+   for (int i = 0; i < _n; ++i)
+      if (_c[i].section == S_VEL + _setup) [self drawCtl:i context:g];
+}
+- (void)drawCtl:(int)i context:(CGContextRef)g {
+   const Ctl *c = &_c[i];
+   if (![self needsToDrawRect:NSInsetRect(c->r, -3, -3)]) return;
+   {
       switch (c->kind) {
       case C_TITLE: [self drawTitle:c]; break;
       case C_KNOB: [self drawKnob:c context:g]; break;
@@ -259,8 +292,22 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
       case C_CLEAR: [self drawClear:c]; break;
       case C_COPY: case C_PASTE: [self drawPadButton:c index:i]; break;
       case C_LEN: case C_SPEED: case C_PAGE: [self drawScale:c]; break;
+      case C_SETUP: [self drawSetupButton:c]; break;
+      case C_CLOSE:
+         drawText("\u00d7", NSMakeRect(c->r.origin.x, c->r.origin.y + 1, c->r.size.width, 18), 15, NSFontWeightRegular, C(MUTED, 1), NSTextAlignmentCenter);
+         break;
       }
    }
+}
+/* VEL and KEY: a button that opens its setup window, lit while it is open. */
+- (void)drawSetupButton:(const Ctl *)c {
+   const BOOL open = _setup == c->id;
+   const NSRect box = NSMakeRect(c->r.origin.x, c->r.origin.y + 17, c->r.size.width, 24);
+   drawText(c->label, NSMakeRect(c->r.origin.x, c->r.origin.y, c->r.size.width, 14), 10, NSFontWeightMedium, C(MUTED, 1), NSTextAlignmentLeft);
+   if (open) fillRound(box, 5, C(VALUE, 1));
+   else strokeRound(box, 5, 1, C(MUTED, 0.8));
+   drawText("SETUP", NSMakeRect(box.origin.x, box.origin.y + 4, box.size.width, 15), 11, NSFontWeightSemibold,
+            open ? C(DARK, 1) : C(TEXT, 0.85), NSTextAlignmentCenter);
 }
 
 - (void)drawTitle:(const Ctl *)c {
@@ -491,6 +538,20 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
    [self endScroll];
    self.needsDisplay = YES;
 }
+/* Opens setup window w (0 VEL, 1 KEY), or closes it at -1. A twist in the old one ends. */
+- (void)showSetup:(int)w {
+   if (w == _setup) return;
+   if (_dragId >= 0) [self endDrag];
+   _dragCtl = -1;
+   [self endScroll];
+   if (_setup >= 0) [self setNeedsDisplayInRect:NSInsetRect([self setupRect:_setup], -6, -6)];
+   _setup = w;
+   if (w >= 0) {
+      [self setNeedsDisplayInRect:NSInsetRect([self setupRect:w], -6, -6)];
+      for (int i = 0; i < _n; ++i)
+         if (_c[i].section == S_VEL + w) _sig[i] = [self signature:&_c[i]];
+   }
+}
 /* A MIDI note's line under its step: 16 at the note, fading to 0. */
 - (int)noteLevel:(int)step {
    const double t = (CACurrentMediaTime() - _noteAt[step]) / kNoteFade;
@@ -633,10 +694,12 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
       const double b = [self shown:ident];
       h = mix(mix(mix(h, ident), b), [self effective:ident shown:b]);
       h = mix(mix(h, [self heldLock:ident]), [self activeLock:ident]);
-      if (ident >= P_LFO && ident < P_LEVEL && (ident - P_LFO) % 8 == 1) h = mix(h, [self base:ident - 1]);   /* DEST's name comes from its PAGE */
+      if ((ident >= P_LFO && ident < P_LEVEL && (ident - P_LFO) % 8 == 1) || (ident >= P_ASSIGN && (ident - P_ASSIGN) % 3 == 1))
+         h = mix(h, [self base:ident - 1]);   /* DEST's name comes from its PAGE */
       return mix(mix(h, [self held] != 0), ident == _dragId);
    }
    case C_SWITCH: case C_KEYS: return mix(h, [self switchOn:c]);
+   case C_SETUP: return mix(h, _setup == c->id);
    case C_CLEAR: return mix(h, [self canClear]);
    case C_COPY: case C_PASTE: {
       const BOOL shown = [self padButtonsShown:c->id];
@@ -669,6 +732,7 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
    }
    [self followLfos];
    for (int i = 0; i < _n; ++i) {
+      if (![self visible:&_c[i]]) continue;
       const uint64_t s = [self signature:&_c[i]];
       if (s != _sig[i]) { _sig[i] = s; [self setNeedsDisplayInRect:NSInsetRect(_c[i].r, -3, -3)]; }
    }
@@ -743,7 +807,8 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
 
 - (int)hit:(NSPoint)pt {
    for (int i = 0; i < _n; ++i) {
-      if (_c[i].kind == C_TITLE) continue;
+      if (_c[i].kind == C_TITLE || ![self visible:&_c[i]]) continue;
+      if (_setup >= 0 && _c[i].section < S_VEL && _c[i].kind != C_SETUP) continue;   /* an open window takes the mouse */
       if ((_c[i].kind == C_COPY || _c[i].kind == C_PASTE) && ![self padButtonsShown:_c[i].id]) continue;
       if (_c[i].kind == C_PAD) {
          const NSPoint o = NSMakePoint(NSMidX(_c[i].r), _c[i].r.origin.y + 49);
@@ -792,6 +857,7 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
 - (void)mouseDown:(NSEvent *)e {
    const NSPoint pt = [self convertPoint:e.locationInWindow fromView:nil];
    const int i = [self hit:pt];
+   if (_setup >= 0 && i < 0 && !NSPointInRect(pt, [self setupRect:_setup])) { [self showSetup:-1]; return; }   /* a click outside closes it */
    if (i < 0) return;
    const Ctl *c = &_c[i];
    switch (c->kind) {
@@ -807,6 +873,8 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
       [self showPage:c->id];
       _dragCtl = i;
       break;
+   case C_SETUP: [self showSetup:_setup == c->id ? -1 : c->id]; break;
+   case C_CLOSE: [self showSetup:-1]; break;
    case C_SPEED:
       atomic_store_explicit(&_ui->speed, (int8_t)((atomic_load_explicit(&_ui->speed, memory_order_relaxed) + 1) & 3), memory_order_relaxed);
       mt_ui_pattern_changed(_p);

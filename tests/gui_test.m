@@ -3,7 +3,8 @@
  *  - trigs: a click toggles; a long press does not; right-click and ctrl-click
  *    latch a hold; a drag on a knob then writes a lock, not the kit value
  *  - clicking a knob while holding locks / unlocks it; CLR LOCKS clears the step
- *  - the keyboard is ignored until KEYBOARD is on; 12345678qwertyui then hold
+ *  - VEL and KEY SETUP open KIT ASSIGN's rows in windows that take the mouse while open
+ *  - the keyboard is ignored until KEYBOARD CAPTURE is on; 12345678qwertyui then hold
  *    trigs, by physical key; other keys stay the host's
  *  - holds end when the window hides, closes, or (for keys) loses focus
  *  - a drag is one gesture; a drag cut short by closing still ends its gesture
@@ -219,6 +220,13 @@ static BOOL sameStep(int a, int b) {
 typedef struct { clap_input_events_t api; const clap_event_header_t *e; } One;
 static uint32_t one_size(const clap_input_events_t *x) { return ((const One *)x->ctx)->e ? 1 : 0; }
 static const clap_event_header_t *one_get(const clap_input_events_t *x, uint32_t i) { (void)i; return ((const One *)x->ctx)->e; }
+/* a host's value change, through the parameters' flush */
+static void setp(int id, double v) {
+   const clap_event_param_value_t e = {{sizeof e, 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0}, (clap_id)id, NULL, -1, -1, -1, -1, v};
+   One in = {{NULL, one_size, one_get}, &e.header};
+   in.api.ctx = &in;
+   PA->flush(P, &in.api, &out);
+}
 static void process(const clap_event_header_t *e, double beats, bool playing) {
    static float a[256], b[256];
    float *data[2] = {a, b};
@@ -410,6 +418,73 @@ int main(int argc, char **argv) {
    click(1136 + 38, 307);
    CHECK(val(P_LOCK_END) == 1, "NOTE ENDS back on");
    shot(dir, "5_poly");
+
+   /* VEL and KEY SETUP: KIT ASSIGN's KEY VEL and KEY TRK tabs in small windows over the LFO page */
+   {
+      const CGFloat bx = 1224 + 64, velY = 12 + 53 + 29, keyY = 12 + 53 * 2 + 29;   /* the SETUP buttons */
+      const NSRect vw = NSMakeRect(1214 - 178, 34, 178, 232), kw = NSMakeRect(1214 - 254, 34, 254, 232);
+      CGFloat (^ax)(NSRect, int) = ^CGFloat(NSRect w, int k) { return w.origin.x + 8 + 54 * (k % 3) + 27; };
+      CGFloat (^ay)(NSRect, int) = ^CGFloat(NSRect w, int k) { return w.origin.y + 30 + 100 * (k / 3) + 50; };
+      CHECK(val(P_ASSIGN) == 2 && val(P_ASSIGN + 1) == 5 && val(P_ASSIGN + 2) == 64 && val(P_ASSIGN + 3) == 0 && val(P_ASSIGN + 6) == 1
+            && val(P_ASSIGN + 9) == 0 && val(P_LPKEY) == 1 && val(P_HPKEY) == 1, "a cleared kit's VEL and KEY rows");
+      double before[NPARAM];
+      for (int i = 0; i < NPARAM; ++i) before[i] = val(i);
+      /* closed: the LFO knob under where the window opens is the LFO's */
+      const int lfoTrig = P_LFO + 2;
+      click(976 + 15, 30);                       /* LFO1 */
+      drag(kx(4, 2), ky(2), -40);
+      CHECK(val(lfoTrig) != before[lfoTrig], "the LFO knob under the window");
+      setp(lfoTrig, before[lfoTrig]);
+      /* open: the same drag turns VEL 1 DEST, and nothing under the window moves */
+      click(bx, velY);
+      drag(ax(vw, 1), ay(vw, 1), -60);          /* 7 steps over 200 points */
+      CHECK(val(P_ASSIGN + 1) == 7, "VEL 1 DEST dragged up: %g", val(P_ASSIGN + 1));
+      CHECK(val(lfoTrig) == before[lfoTrig], "a knob under the open window moved");
+      drag(ax(vw, 2), ay(vw, 2), -60);
+      CHECK(val(P_ASSIGN + 2) > 64, "VEL 1 ADD up: %g", val(P_ASSIGN + 2));
+      char t[CLAP_NAME_SIZE];
+      PA->value_to_text(P, P_ASSIGN + 2, 100, t, sizeof t);
+      CHECK(!strcmp(t, "+36"), "ADD text %s", t);
+      PA->value_to_text(P, P_ASSIGN + 1, 5, t, sizeof t);
+      CHECK(!strcmp(t, "VOL"), "DEST text %s", t);
+      dbl(ax(vw, 2), ay(vw, 2));
+      CHECK(val(P_ASSIGN + 2) == 64, "double-click: ADD back to 0");
+      drag(ax(vw, 3), ay(vw, 3), -60);
+      CHECK(val(P_ASSIGN + 3) > 0 && val(P_ASSIGN + 3) <= 8, "VEL 2 PAGE: %g", val(P_ASSIGN + 3));
+      shot(dir, "12_vel_setup");
+      /* a click inside the window but on no control keeps it open; one outside closes it and does nothing else */
+      click(vw.origin.x + 10, vw.origin.y + 150);
+      drag(ax(vw, 1), ay(vw, 1), 40);
+      CHECK(val(P_ASSIGN + 1) < 7, "the window closed on a click inside it");
+      const uint64_t tr = trigs();
+      click(padx(2), PADY);
+      CHECK(trigs() == tr, "the click that closed the window reached a pad");
+      drag(kx(4, 2), ky(2), -40);
+      CHECK(val(lfoTrig) != before[lfoTrig], "the window stayed open after a click outside");
+      setp(lfoTrig, before[lfoTrig]);
+      /* KEY: its rows and the HPF and LPF switches; VEL's button switches windows; x closes */
+      click(bx, keyY);
+      click(kw.origin.x + 180 + 32, kw.origin.y + 58 + 29);
+      CHECK(val(P_HPKEY) == 0 && val(P_LPKEY) == 1, "HPF off");
+      click(kw.origin.x + 180 + 32, kw.origin.y + 158 + 29);
+      CHECK(val(P_LPKEY) == 0, "LPF off");
+      drag(ax(kw, 5), ay(kw, 5), -30);
+      CHECK(val(P_ASSIGN + 11) > 64, "KEY 2 ADD");
+      shot(dir, "13_key_setup");
+      click(bx, velY);
+      drag(ax(vw, 2), ay(vw, 2), -30);
+      CHECK(val(P_ASSIGN + 2) > 64 && val(P_ASSIGN + 11) > 64, "VEL's button opened VEL");
+      click(bx, velY);                           /* its own button closes it */
+      drag(kx(4, 2), ky(2), -40);
+      CHECK(val(lfoTrig) != before[lfoTrig], "VEL's button did not close VEL");
+      click(bx, keyY);
+      click(NSMaxX(kw) - 17, kw.origin.y + 15);  /* x */
+      drag(kx(4, 2), ky(2), 40);
+      CHECK(val(lfoTrig) == before[lfoTrig], "x did not close KEY");
+      for (int i = P_ASSIGN; i < NPARAM; ++i) setp(i, before[i]);
+      setp(P_HPKEY, 1); setp(P_LPKEY, 1);
+      pump();
+   }
 
    /* a state with locks comes back, and the editor follows */
    Buf saved = save();

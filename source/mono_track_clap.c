@@ -62,12 +62,15 @@ static const char *const lfo_mult[7] = {"1X", "2X", "4X", "8X", "16X", "32X", "6
 static const char *const midi_label[8] = {"LEN", "VEL", "PB", "PCHG", "CC 1", "CC 2", "CC 3", "CC 4"};
 static const char *const range_name[8] = {"1/12", "2/12", "7/12", "1OCT", "2OCT", "4OCT", "8OCT", "16OC"};
 static const char *const track_label[10] = {"LEVEL", "LP KEY", "HP KEY", "BEND", "MASTER TUNE", "POLY", "MIDI TRIG SYN", "MIDI TRIG FILT", "MIDI TRIG LFO", "NOTE ENDS LOCK"};
+/* KIT ASSIGN's KEY VEL and KEY TRK rows as a cleared kit has them (0x251aa0): VEL AMP VOL, KEY SYNT PAR1, then PTCH 1/12, all ADD 0 */
+static const char *const assign_field[3] = {"PAGE", "DEST", "ADD"};
+static const unsigned char assign_def[12] = {2, 5, 64, 0, 0, 64, 1, 0, 64, 0, 0, 64};
 
 static const char *const features[] = {
    CLAP_PLUGIN_FEATURE_INSTRUMENT, CLAP_PLUGIN_FEATURE_SYNTHESIZER, CLAP_PLUGIN_FEATURE_STEREO, NULL
 };
 #define DESCRIPTOR(m) { .clap_version = CLAP_VERSION_INIT, .id = machines[m].id, .name = machines[m].name, \
-   .vendor = "Independent DSP", .url = "", .manual_url = "", .support_url = "", .version = "0.5.4", \
+   .vendor = "Independent DSP", .url = "", .manual_url = "", .support_url = "", .version = "0.6.0", \
    .description = "A whole Monomachine track: machine, EQ, filter, AMP, SRR, delay, LFOs, ported from its code", .features = features }
 static const clap_plugin_descriptor_t descriptors[MT_MACHINES] = {
    DESCRIPTOR(0), DESCRIPTOR(1), DESCRIPTOR(2), DESCRIPTOR(3), DESCRIPTOR(4), DESCRIPTOR(5), DESCRIPTOR(6), DESCRIPTOR(7),
@@ -84,12 +87,14 @@ static double def_of(int m, int id) {
    if (id < P_AMP) return machines[m].def[id];
    if (id < P_LFO) return knob_def[id / 8 - 1][id % 8];
    if (id < P_LEVEL) return lfo_def[(id - P_LFO) % 8];
+   if (id >= P_ASSIGN) return assign_def[id - P_ASSIGN];
    return id == P_LEVEL ? 100 : id == P_MTUNE ? 440 : id == P_POLY ? 0 : 1;
 }
-static bool is_switch(int id) { return id == P_LPKEY || id == P_HPKEY || id >= P_POLY; }
+static bool is_switch(int id) { return id == P_LPKEY || id == P_HPKEY || (id >= P_POLY && id < P_ASSIGN); }
 static double lo_of(int id) { return id == P_MTUNE ? 400 : 0; }
 static double hi_of(int id) {
    if (id >= P_LFO && id < P_LEVEL && lfo_size[(id - P_LFO) % 8]) return lfo_size[(id - P_LFO) % 8] - 1;
+   if (id >= P_ASSIGN) return (int[]){8, 7, 127}[(id - P_ASSIGN) % 3];   /* PAGE, DEST, ADD + 64 */
    return id == P_MTUNE ? 499.9 : id == P_BEND ? 7 : is_switch(id) ? 1 : 127;
 }
 /* an LFO parameter's value as the kit byte the OS reads */
@@ -97,7 +102,13 @@ static int lfo_raw(int field, double v) {
    const int n = lfo_size[field], k = (int)lrint(v);
    return n ? (k * 128 + n - 1) / n : k;
 }
-static bool stepped(int id) { return (id >= P_LFO && id < P_LEVEL) || is_switch(id) || id == P_BEND; }
+static bool stepped(int id) { return (id >= P_LFO && id < P_LEVEL) || is_switch(id) || id == P_BEND || id >= P_ASSIGN; }
+/* The list fields: an LFO's, and ASSIGN's PAGE and DEST, which read as an LFO's do. -1 for the others. */
+static int list_field(int id) {
+   if (id >= P_LFO && id < P_LEVEL) return (id - P_LFO) % 8;
+   if (id >= P_ASSIGN && (id - P_ASSIGN) % 3 < 2) return (id - P_ASSIGN) % 3;
+   return -1;
+}
 
 /* ---- sample-rate conversion (windowed sinc, as in Mono Delay) -------------- */
 
@@ -163,6 +174,7 @@ typedef struct {
    bool gate;                         /* a MIDI note started the AMP, so its release ends it */
    /* the keys held, in the order pressed; the note sounding; the frame's news */
    int held[128], nheld, note;
+   int vel, key;                      /* KIT ASSIGN's controllers: the last note-on's velocity, the note sounding (0 until one) */
    unsigned pending;
    int32_t y[2][MT_FRAMES];
 } Voice;
@@ -278,6 +290,10 @@ static void control_frame(Plugin *s, Voice *v) {
       for (int k = 0; k < 8; ++k) h->raw[l][k] = lfo_raw(k, active_or(s, P_LFO + 8 * l + k));
    h->level = (int32_t)lrint(clamp(value(s, P_LEVEL) + s->mod[P_LEVEL], 0, 127) * 65536.0);
    h->bend = mf_bend(s->bend, (int)lrint(value(s, P_BEND)));
+   for (int i = 0; i < 4; ++i) {   /* VEL 1, KEY 1, VEL 2, KEY 2 */
+      const int id = P_ASSIGN + 6 * (i & 1) + 3 * (i >> 1), page = (int)lrint(value(s, id)), dest = (int)lrint(value(s, id + 1));
+      h->assign[i] = (MtAssign){page, dest, mt_assign_value(i & 1 ? v->key : v->vel, page, dest, (int)lrint(value(s, id + 2)) - 64)};
+   }
    const bool start = !v->settled;
    if (start) mt_host_reset(h);
    const int32_t tick = tick_of(s->tempo);
@@ -331,6 +347,8 @@ static void poly_sync(Plugin *s) {
       if (i == 0) { v->pending = PEND_OFF; v->reload = on; continue; }
       v->pending = 0;
       v->note = s->voice[0].note;
+      v->vel = s->voice[0].vel;   /* each voice takes the poly track's controllers (0x242058) */
+      v->key = s->voice[0].key;
       v->settled = false;
       v->quick = true;
       v->reload = false;
@@ -394,6 +412,7 @@ static void reset(Plugin *s) {
       v->settled = v->quick = v->reload = v->gate = false;
       v->nheld = 0;
       v->note = 60;
+      v->vel = v->key = 0;
       v->pending = 0;
    }
    s->poly = value(s, P_POLY) >= 0.5;
@@ -422,11 +441,13 @@ static void voice_release(Voice *v) {
    if (v->gate) v->pending = (v->pending & ~(unsigned)PEND_ON) | PEND_OFF;
    v->gate = false;
 }
-static void voice_on(Plugin *s, Voice *v, int key) {
+/* A note-on also sets KIT ASSIGN's KEY and VEL (0x246060). */
+static void voice_on(Plugin *s, Voice *v, int key, int vel) {
    for (int i = 0; i < v->nheld; ++i)
       if (v->held[i] == key) { memmove(v->held + i, v->held + i + 1, (size_t)(--v->nheld - i) * sizeof *v->held); break; }
    v->held[v->nheld++] = key;
-   v->note = key;
+   v->note = v->key = key;
+   v->vel = vel;
    const unsigned t = midi_trigs(s);
    if (t & PEND_ON) v->gate = true;
    voice_trig(v, t);
@@ -436,21 +457,21 @@ static void voice_off(Plugin *s, Voice *v, int key) {
       if (v->held[i] == key) {
          memmove(v->held + i, v->held + i + 1, (size_t)(--v->nheld - i) * sizeof *v->held);
          if (key != v->note) return;
-         if (v->nheld) { v->note = v->held[v->nheld - 1]; voice_trig(v, midi_trigs(s)); }
+         if (v->nheld) { v->note = v->key = v->held[v->nheld - 1]; voice_trig(v, midi_trigs(s)); }   /* KEY follows (0x24b6f6) */
          else voice_release(v);
          return;
       }
 }
 static void seq_note(Plugin *s);
-static void note_on(Plugin *s, int key) {
+static void note_on(Plugin *s, int key, int vel) {
    seq_note(s);
-   if (!s->poly) { voice_on(s, &s->voice[0], key); return; }
+   if (!s->poly) { voice_on(s, &s->voice[0], key, vel); return; }
    if (s->poly_held[key]) return;   /* a repeat with no note-off */
    s->poly_held[key] = true;
    int stolen;
    Voice *v = &s->voice[mt_alloc_on(&s->alloc, key, &stolen)];
    if (stolen >= 0) voice_off(s, v, stolen);
-   voice_on(s, v, key);
+   voice_on(s, v, key, vel);
 }
 static void note_off(Plugin *s, int key) {
    if (!s->poly) { voice_off(s, &s->voice[0], key); return; }
@@ -583,7 +604,7 @@ static void event(Plugin *s, const clap_event_header_t *h) {
          const double x = clamp(e->value, lo_of(id), hi_of(id));
          if (id < MT_LOCKS && x != value(s, id)) atomic_store_explicit(&s->ui.active[id], -1, memory_order_relaxed);   /* a new value replaces a sounding lock, as a knob does on the unit */
          set_value(s, id, x);
-         if (id >= P_LFO && id < P_LEVEL && (id - P_LFO) % 8 == L_PAGE) {
+         if (list_field(id) == L_PAGE) {
             atomic_store(&s->text_dirty, true);
             if (s->host->request_callback) s->host->request_callback(s->host);
          }
@@ -597,11 +618,14 @@ static void event(Plugin *s, const clap_event_header_t *h) {
       }
    } else if ((h->type == CLAP_EVENT_NOTE_ON || h->type == CLAP_EVENT_NOTE_OFF) && h->size >= sizeof(clap_event_note_t)) {
       const clap_event_note_t *e = (const void *)h;
-      if (e->key >= 0 && e->key < 128) { if (h->type == CLAP_EVENT_NOTE_ON) note_on(s, e->key); else note_off(s, e->key); }
+      if (e->key >= 0 && e->key < 128) {
+         if (h->type == CLAP_EVENT_NOTE_OFF) note_off(s, e->key);
+         else note_on(s, e->key, (int)lrint(clamp(isfinite(e->velocity) ? e->velocity : 0, 0, 1) * 127));
+      }
    } else if (h->type == CLAP_EVENT_MIDI && h->size >= sizeof(clap_event_midi_t)) {
       const clap_event_midi_t *e = (const void *)h;
       const int status = e->data[0] & 0xf0, key = e->data[1] & 0x7f;
-      if (status == 0x90 && e->data[2] > 0) note_on(s, key);
+      if (status == 0x90 && e->data[2] > 0) note_on(s, key, e->data[2] & 0x7f);
       else if (status == 0x80 || status == 0x90) note_off(s, key);
       else if (status == 0xe0) s->bend = (e->data[2] & 0x7f) * 2 + ((e->data[1] & 0x7f) >> 6);
    }
@@ -695,7 +719,8 @@ static void param_name(int m, int id, char *out, size_t cap) {
    if (id < P_AMP) snprintf(out, cap, "%s", machines[m].label[id]);
    else if (id < P_LFO) snprintf(out, cap, "%s %s", page_name[id / 8], knob_label[id / 8 - 1][id % 8]);
    else if (id < P_LEVEL) snprintf(out, cap, "LFO%d %s", (id - P_LFO) / 8 + 1, lfo_label[(id - P_LFO) % 8]);
-   else snprintf(out, cap, "%s", track_label[id - P_LEVEL]);
+   else if (id < P_ASSIGN) snprintf(out, cap, "%s", track_label[id - P_LEVEL]);
+   else snprintf(out, cap, "%s %d %s", id - P_ASSIGN < 6 ? "VEL" : "KEY", (id - P_ASSIGN) / 3 % 2 + 1, assign_field[(id - P_ASSIGN) % 3]);
 }
 
 static uint32_t params_count(const clap_plugin_t *p) { (void)p; return NPARAM; }
@@ -710,7 +735,7 @@ static bool params_info(const clap_plugin_t *p, uint32_t i, clap_param_info_t *p
    param_name(s->machine, (int)i, pi->name, sizeof pi->name);
    if (i < P_LFO) snprintf(pi->module, sizeof pi->module, "%s", page_name[i / 8]);
    else if (i < P_LEVEL) snprintf(pi->module, sizeof pi->module, "LFO%d", (int)(i - P_LFO) / 8 + 1);
-   else snprintf(pi->module, sizeof pi->module, "TRACK");
+   else snprintf(pi->module, sizeof pi->module, i < P_ASSIGN ? "TRACK" : "ASSIGN");
    pi->min_value = lo_of((int)i);
    pi->max_value = hi_of((int)i);
    pi->default_value = def_of(s->machine, (int)i);
@@ -732,6 +757,7 @@ static const char *dest_name(int m, int page, int dest) {
 }
 static bool bipolar(int m, int id) {
    if (id < P_AMP) return machines[m].bipolar >> id & 1;
+   if (id >= P_ASSIGN) return (id - P_ASSIGN) % 3 == 2;   /* ADD: knob - 64 */
    return id < P_LFO && (knob_bipolar[id / 8 - 1] >> (id % 8) & 1);
 }
 /* ENS's PCH2-4: the step of ms_ens_steps a knob value selects, and its interval in semitones */
@@ -789,17 +815,18 @@ static bool params_to_text(const clap_plugin_t *p, clap_id cid, double v, char *
    const Plugin *s = p->plugin_data;
    const int id = (int)cid, m = s->machine;
    if (cid >= NPARAM || !out || !cap || !isfinite(v)) return false;
-   if (id >= P_LFO && id < P_LEVEL) {
-      const int l = (id - P_LFO) / 8, f = (id - P_LFO) % 8, k = (int)lrint(clamp(v, 0, hi_of(id)));
-      switch (f) {
+   if (list_field(id) >= 0) {
+      const int k = (int)lrint(clamp(v, 0, hi_of(id)));
+      switch (list_field(id)) {
       case L_PAGE: snprintf(out, cap, "%s", lfo_page[k]); break;
-      case L_DEST: snprintf(out, cap, "%s", dest_name(m, (int)lrint(value(s, P_LFO + 8 * l + L_PAGE)), k)); break;
+      case L_DEST: snprintf(out, cap, "%s", dest_name(m, (int)lrint(value(s, id - 1)), k)); break;
       case L_TRIG: snprintf(out, cap, "%s", lfo_trig[k]); break;
       case L_WAVE: snprintf(out, cap, "%s", lfo_wave[k]); break;
       case L_MULT: snprintf(out, cap, "%s", lfo_mult[k]); break;
       default: snprintf(out, cap, "%d", k); break;
       }
-   } else if (is_switch(id)) snprintf(out, cap, "%s", v >= 0.5 ? "ON" : "OFF");
+   } else if (id >= P_ASSIGN) snprintf(out, cap, "%+d", (int)lrint(clamp(v, 0, 127)) - 64);   /* ADD */
+   else if (is_switch(id)) snprintf(out, cap, "%s", v >= 0.5 ? "ON" : "OFF");
    else if (is_ens_pitch(m, id)) {   /* unison mutes the oscillator; the just intervals show their cents and ratio */
       const int st = ens_step(v);
       if (ms_ens_steps[st].num) snprintf(out, cap, "%+.2f st (%d/%d)", ens_semitones(st), ms_ens_steps[st].num, ms_ens_steps[st].den);
@@ -826,9 +853,9 @@ static bool params_from_text(const clap_plugin_t *p, clap_id cid, const char *te
    const Plugin *s = p->plugin_data;
    const int id = (int)cid;
    if (cid >= NPARAM || !text || !v) return false;
-   if (id >= P_LFO && id < P_LEVEL) {
+   if (list_field(id) >= 0) {
       const char *const *list[8] = {lfo_page, NULL, lfo_trig, lfo_wave, lfo_mult, NULL, NULL, NULL};
-      const int f = (id - P_LFO) % 8;
+      const int f = list_field(id);
       if (list[f]) {
          const int i = match(text, list[f], lfo_size[f]);
          if (i >= 0) { *v = i; return true; }
@@ -895,15 +922,15 @@ static const clap_plugin_params_t params = {params_count, params_info, params_ge
 /* Version 1 (0.1.0) held the first 61 parameters; version 2 (0.2.0) 65, then a
  * 16-step pattern: the trig mask and every step's locks; version 3 adds NOTE ENDS
  * LOCK. Version 4 (0.5.0) holds 64 steps: the trig mask (8 bytes), length, speed
- * and every step's locks. */
+ * and every step's locks. Version 5 (0.6.0) adds KIT ASSIGN's 12 parameters. */
 #define STATE_V1 (8 + 8 * 61)
 #define STATE_16(n) (8 + 8 * (n) + 2 + 16 * MT_LOCKS)
-#define STATE_V4 (8 + 8 * NPARAM + 10 + MT_STEPS * MT_LOCKS)
+#define STATE_64(n) (8 + 8 * (n) + 10 + MT_STEPS * MT_LOCKS)
 static bool state_save(const clap_plugin_t *p, const clap_ostream_t *st) {
    const Plugin *s = p->plugin_data;
-   uint8_t buf[STATE_V4] = {0};
+   uint8_t buf[STATE_64(NPARAM)] = {0};
    memcpy(buf, machines[s->machine].magic, 4);
-   buf[7] = 4;
+   buf[7] = 5;
    for (int i = 0; i < NPARAM; ++i)
       for (int b = 0; b < 8; ++b) buf[8 + 8 * i + b] = (uint8_t)(to_bits(value(s, i)) >> (8 * b));
    uint8_t *pat = buf + 8 + 8 * NPARAM;
@@ -923,7 +950,7 @@ static bool state_save(const clap_plugin_t *p, const clap_ostream_t *st) {
 }
 static bool state_load(const clap_plugin_t *p, const clap_istream_t *st) {
    Plugin *s = p->plugin_data;
-   uint8_t buf[STATE_V4];
+   uint8_t buf[STATE_64(NPARAM)];
    uint64_t got = 0;
    while (got < sizeof buf) {
       const int64_t n = st && st->read ? st->read(st, buf + got, sizeof buf - got) : -1;
@@ -933,9 +960,9 @@ static bool state_load(const clap_plugin_t *p, const clap_istream_t *st) {
    }
    if (got < 8 || memcmp(buf, machines[s->machine].magic, 4) || buf[4] || buf[5] || buf[6]) return false;
    const int version = buf[7];
-   if (version < 1 || version > 4) return false;
-   const int count = version == 1 ? 61 : version == 2 ? 65 : NPARAM;
-   if (got != (uint64_t)(version == 1 ? STATE_V1 : version < 4 ? STATE_16(count) : STATE_V4)) return false;
+   if (version < 1 || version > 5) return false;
+   const int count = version == 1 ? 61 : version == 2 ? 65 : version < 5 ? P_ASSIGN : NPARAM;
+   if (got != (uint64_t)(version == 1 ? STATE_V1 : version < 4 ? STATE_16(count) : STATE_64(count))) return false;
    double v[NPARAM];
    for (int i = 0; i < NPARAM; ++i) {
       if (i >= count) { v[i] = def_of(s->machine, i); continue; }
@@ -1040,7 +1067,7 @@ void mt_ui_set(const clap_plugin_t *p, int id, double x) {
    if (id < MT_LOCKS && x != value(s, id)) atomic_store_explicit(&s->ui.active[id], -1, memory_order_relaxed);
    set_value(s, id, x);
    atomic_fetch_or_explicit(&s->ui_flag[id], (uint8_t)UI_DIRTY, memory_order_acq_rel);
-   if (id >= P_LFO && id < P_LEVEL && (id - P_LFO) % 8 == L_PAGE) {
+   if (list_field(id) == L_PAGE) {
       atomic_store(&s->text_dirty, true);
       if (s->host->request_callback) s->host->request_callback(s->host);
    }

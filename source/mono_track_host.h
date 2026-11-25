@@ -21,11 +21,15 @@ typedef struct {
    int seg, page, dest;     /* RND's last segment; the target, as of the last evaluation */
 } MtLfo;
 
+/* One KIT ASSIGN row of the KEY VEL or KEY TRK tab: its target and what it adds. */
+typedef struct { int page, dest; int32_t value; } MtAssign;
+
 typedef struct {
    int32_t knob[MT_KNOBS];  /* what each knob sends (value << 16): SYN 0-7, AMP 8-15, FILT 16-23, EFX 24-31 */
    int32_t level;           /* LEVEL << 16 */
    int32_t raw[3][8];       /* the LFO pages' values, 0..127 */
    int32_t bend;            /* what KIT ASSIGN adds to word 30 */
+   MtAssign assign[4];      /* KIT ASSIGN's velocity and key rows, in the order applied: VEL 1, KEY 1, VEL 2, KEY 2 */
    int32_t shadow[3][8];    /* LFO parameters as the LFOs read them: raw << 16, plus LFO-to-LFO modulation */
    int32_t word[MT_WORDS];  /* the block before modulation */
    int32_t block[MT_WORDS]; /* the block the DSP gets */
@@ -176,9 +180,21 @@ static void mt_host_rebuild(MtHost *h, const int32_t *mod) {
             const int64_t v = (int64_t)*p + mod[k];
             *p = v < 0 ? 0 : v > 0x7effff ? 0x7effff : (int32_t)v;
          }
-   /* KIT ASSIGN (pitch bend), then the LFOs */
+   /* KIT ASSIGN (0x010003ba): pitch bend, velocity and key; then the LFOs */
    h->block[W_PMOD] = mf_add_mod(h->block[W_PMOD], h->bend);
+   for (int i = 0; i < 4; ++i) {
+      const MtAssign *a = &h->assign[i];
+      int32_t *p = a->page == 0 ? &h->block[W_PMOD] : a->page == 1 ? &h->block[W_SYN + a->dest]
+                 : a->page <= 4 ? &h->block[(a->page - 2) * 8 + a->dest] : a->page <= 7 ? &h->shadow[a->page - 5][a->dest] : NULL;
+      if (p) *p = mf_add_mod(*p, a->value);   /* MIDI: nothing on an audio track */
+   }
    mt_lfo_apply(h, h->lfo_trig);
+}
+
+/* KIT ASSIGN's value for a controller at 0..127 (0x23f8ba): ctl x ADD x the page's
+ * step, 4 x the DEST range in semitones on PTCH (0x251b30) and $400 elsewhere. */
+static int32_t mt_assign_value(int ctl, int page, int dest, int add) {
+   return ctl * add * (page == 0 ? 4 * mf_range[dest & 7] : 0x400);
 }
 
 /* Words at their targets, LFOs at rest. */
