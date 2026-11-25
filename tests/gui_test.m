@@ -552,18 +552,18 @@ int main(int argc, char **argv) {
       CHECK(begins == 1 && ends == 1, "one scroll, one gesture: %d %d", begins, ends);
 
       /* a wheel has no phases: a pause ends its scroll */
-      const CGFloat x2 = kx(3, 1), y2 = ky(1);
+      const CGFloat x2 = kx(3, 1), y2 = ky(1);   /* 10 pixels is one line, a wheel's notch: one step on 0-127 */
       const double kit2 = val(P_EFX + 1);
       key(NSEventTypeKeyDown, 32);               /* U: index 14 */
-      scroll(x2, y2, 3, 0, 0, NO);
+      scroll(x2, y2, 10, 0, 0, NO);
       const int l3 = lockv(14, P_EFX + 1);
       CHECK(l3 > (int)kit2, "a wheel click on a held trig: %d", l3);
       key(NSEventTypeKeyUp, 32);
-      scroll(x2, y2, 3, 0, 0, NO);
+      scroll(x2, y2, 10, 0, 0, NO);
       CHECK(val(P_EFX + 1) == kit2 && lockv(14, P_EFX + 1) == l3, "a wheel kept going after its key");
       [NSThread sleepForTimeInterval:0.3];   /* a run loop with no sources returns at once */
       pump();
-      scroll(x2, y2, 3, 0, 0, NO);
+      scroll(x2, y2, 10, 0, 0, NO);
       CHECK(val(P_EFX + 1) > kit2, "a wheel after a pause edits the kit value");
       [NSThread sleepForTimeInterval:0.3];   /* a run loop with no sources returns at once */
       pump();

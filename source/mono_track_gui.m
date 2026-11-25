@@ -20,7 +20,7 @@
 #include "mono_track_ui.h"
 
 /* Plug-ins share one host process, and Objective-C classes one namespace: the version keeps builds apart. */
-#define MTEditorView MonoTrackEditorView_0_5_0
+#define MTEditorView MonoTrackEditorView_0_5_1
 
 enum { C_TITLE, C_KNOB, C_TAB, C_SLIDER, C_SWITCH, C_KEYS, C_PAD, C_CLEAR, C_COPY, C_PASTE, C_LEN, C_SPEED, C_PAGE, C_MAX = 128 };
 typedef struct { int kind, id, section; NSRect r; const char *label; } Ctl;
@@ -33,6 +33,7 @@ static const unsigned short kKeyCode[16] = {18, 19, 20, 21, 23, 22, 26, 28, 12, 
 static const double kTapSeconds = 0.25;   /* shorter is a tap (toggles the trig), longer only shows the step */
 static const double kNoteFade = 0.7;      /* seconds a MIDI note's line takes to fade */
 static const double kScrollPause = 0.25;  /* a wheel idle this long has finished its scroll */
+static const double kScrollSpan = 1000;   /* points of scroll that sweep a whole range (400 before 0.5.1) */
 static const double kPressFlash = 0.15;   /* seconds CPY or PST stays lit after a click */
 
 static NSColor *C(unsigned rgb, double a) {
@@ -912,7 +913,7 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
    [self checkHolds];
    const int i = [self hit:[self convertPoint:e.locationInWindow fromView:nil]];
    if (i >= 0 && _c[i].kind == C_LEN) {
-      [self moveLength:e.scrollingDeltaY * (e.hasPreciseScrollingDeltas ? 1 : 8) * 62 / 400 * (e.modifierFlags & NSEventModifierFlagShift ? 0.1 : 1)];
+      [self moveLength:e.scrollingDeltaY * (e.hasPreciseScrollingDeltas ? 1 : 8) * 62 / kScrollSpan * (e.modifierFlags & NSEventModifierFlagShift ? 0.1 : 1)];
       return;
    }
    if (_scrollDead) return;
@@ -921,7 +922,7 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
    if (mt_ui_unused(_p, ident)) return;
    const clap_param_info_t *info = &_info[ident];
    const double px = e.scrollingDeltaY * (e.hasPreciseScrollingDeltas ? 1 : 8);
-   const double delta = px * (info->max_value - info->min_value) / 400 * (e.modifierFlags & NSEventModifierFlagShift ? 0.1 : 1);
+   const double delta = px * (info->max_value - info->min_value) / kScrollSpan * (e.modifierFlags & NSEventModifierFlagShift ? 0.1 : 1);
    if (delta == 0) return;         /* a gesture's begin and end events carry none */
    const BOOL lockEdit = [self held] && ident < UI_LOCKS;
    if (_scrollId != ident) {       /* one scroll is one gesture, ended in tick: after a pause */
