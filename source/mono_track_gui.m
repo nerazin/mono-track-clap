@@ -19,8 +19,12 @@
 #include <string.h>
 #include "mono_track_ui.h"
 
+#ifndef MT_COMMIT
+#define MT_COMMIT "unknown"   /* build_macos.sh passes the git commit */
+#endif
+
 /* Plug-ins share one host process, and Objective-C classes one namespace: the version keeps builds apart. */
-#define MTEditorView MonoTrackEditorView_0_5_2
+#define MTEditorView MonoTrackEditorView_0_5_3
 
 enum { C_TITLE, C_KNOB, C_TAB, C_SLIDER, C_SWITCH, C_KEYS, C_PAD, C_CLEAR, C_COPY, C_PASTE, C_LEN, C_SPEED, C_PAGE, C_MAX = 128 };
 typedef struct { int kind, id, section; NSRect r; const char *label; } Ctl;
@@ -239,6 +243,9 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
    drawText("MIDI TRIGS", NSMakeRect(936, 278, 188, 14), 10, NSFontWeightMedium, C(MUTED, 1), NSTextAlignmentLeft);
    drawText("LOCKS", NSMakeRect(1136, 278, 76, 14), 10, NSFontWeightMedium, C(MUTED, 1), NSTextAlignmentLeft);
    drawText("SCALE", NSMakeRect(936, 330, 188, 14), 10, NSFontWeightMedium, C(MUTED, 1), NSTextAlignmentLeft);
+   char about[64];   /* barely there: the version and the commit it was built from */
+   snprintf(about, sizeof about, "%s (%s)", _p->desc->version, MT_COMMIT);
+   drawText(about, NSMakeRect(16, 370, 200, 12), 9, NSFontWeightRegular, C(MUTED, 0.4), NSTextAlignmentLeft);
    for (int i = 0; i < _n; ++i) {
       const Ctl *c = &_c[i];
       if (![self needsToDrawRect:NSInsetRect(c->r, -3, -3)]) continue;

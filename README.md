@@ -36,6 +36,9 @@ The top row is the unit's data pages: SYN, AMP, FILT, EFX and LFO1-3. The right
 column holds the track's settings, and the bottom row 16 trigs: one page of the
 pattern. Pressing an
 LFO tab and sliding across the others switches to each one under the pointer.
+The bottom-left corner shows, faintly, the version and the commit the build came
+from, such as `0.5.3 (ff94ab5)`. A `+` after the commit marks a build with
+uncommitted changes.
 
 Each LFO tab shows its LFO: the wave it plays over one cycle, on a zero line,
 and a dot where it is now, trailing a short light-blue plume. The wave is drawn from its shape rather than from
