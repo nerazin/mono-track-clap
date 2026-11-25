@@ -19,7 +19,11 @@
  *  - SCALE: the speed cycles; a page button shows its page on the pads, and one past the
  *    end extends the pattern, filling each empty page it reaches as the unit does; LEN
  *    drags, and a shorter pattern sends the pads back to page 1; switching pages lets go
- *    of held trigs; the playing page's button shows the playhead */
+ *    of held trigs; the playing page's button shows the playhead
+ *  - a knob's or slider's value lights up under the mouse; a double-click on it types a
+ *    new one in any of its forms (numbers, names, ratios, Hz), Enter or a click elsewhere
+ *    takes it, Esc drops it, text that reads as no value beeps; while a step is held it
+ *    types the lock; a double-click elsewhere on the knob still resets it */
 #import <Cocoa/Cocoa.h>
 #include <dlfcn.h>
 #include <objc/runtime.h>
@@ -875,6 +879,126 @@ int main(int argc, char **argv) {
       click(padx(1), PADY);
       dbl(pagex(0), SCALEY);
       CHECK(length() == 16 && trigs() == t5, "double-click page 1: %d", length());
+   }
+
+   /* a value lights up under the mouse, and a double-click on it types a new one */
+   {
+      NSTextField *(^field)(void) = ^NSTextField *(void) {
+         for (NSView *v in V.subviews) if ([v isKindOfClass:NSTextField.class]) return (NSTextField *)v;
+         return nil;
+      };
+      void (^move)(CGFloat, CGFloat) = ^(CGFloat x, CGFloat y) {
+         [V mouseMoved:[NSEvent mouseEventWithType:NSEventTypeMouseMoved location:at(x, y) modifierFlags:0 timestamp:0 windowNumber:W.windowNumber context:nil eventNumber:0 clickCount:0 pressure:0]];
+         pump();
+      };
+      /* types into the open field as a user would: the field editor's own text input and commands */
+      void (^type)(const char *, SEL) = ^(const char *text, SEL how) {
+         NSTextField *f = field();
+         CHECK(f && [f.currentEditor isKindOfClass:NSTextView.class], "no field to type '%s' into", text);
+         NSTextView *ed = (NSTextView *)f.currentEditor;
+         [ed selectAll:nil];
+         [ed insertText:[NSString stringWithUTF8String:text] replacementRange:ed.selectedRange];
+         if (how) [ed doCommandBySelector:how];
+         pump();
+      };
+      const SEL enter = @selector(insertNewline:), esc = @selector(cancelOperation:);
+      CGFloat (^vy)(int) = ^CGFloat(int k) { return 52 + (k / 4) * 106 + 87; };   /* a knob's value line */
+      const int pan = P_AMP + 6;
+      char t[CLAP_NAME_SIZE];
+      PA->value_to_text(P, pan, 64, t, sizeof t);
+      CHECK(!strcmp(t, "0.0"), "PAN at the centre reads %s", t);
+      move(4, 300);
+      const uint64_t plain = viewHash();
+      move(kx(1, 6), ky(6));
+      CHECK(viewHash() == plain, "the knob itself lit up");
+      move(kx(1, 6) + 20, vy(6));
+      const uint64_t lit = viewHash();
+      CHECK(lit != plain, "PAN's value did not light up");
+      shot(dir, "14_value_hover");
+      move(4, 300);
+      CHECK(viewHash() == plain, "the light stayed after the mouse left");
+
+      /* Enter takes it; the field shows the value as it reads */
+      dbl(kx(1, 6), vy(6));
+      CHECK(field() && !strcmp(field().stringValue.UTF8String, "0.0"), "the field holds '%s'", field() ? field().stringValue.UTF8String : "(none)");
+      CHECK(W.firstResponder == field().currentEditor, "the field has the keys");
+      type("-12", NULL);
+      shot(dir, "15_value_typing");
+      type("-12", enter);
+      CHECK(!field() && val(pan) == 52, "typed -12: %g", val(pan));
+      dbl(kx(1, 6), ky(6));
+      CHECK(val(pan) == 64, "a double-click on the knob no longer resets it: %g", val(pan));
+      /* Esc drops it; text that reads as no value beeps and stays; a click elsewhere takes what reads */
+      dbl(kx(1, 6), vy(6));
+      type("30", esc);
+      CHECK(!field() && val(pan) == 64, "Esc kept %g", val(pan));
+      dbl(kx(1, 6), vy(6));
+      type("abc", enter);
+      CHECK(field() && val(pan) == 64, "unreadable text closed the field or moved PAN to %g", val(pan));
+      click(1218, 300);
+      CHECK(!field() && val(pan) == 64, "unreadable text left by a click: %g", val(pan));
+      dbl(kx(1, 6), vy(6));
+      type("+5", NULL);
+      click(1218, 300);
+      CHECK(!field() && val(pan) == 69, "a click elsewhere took %g", val(pan));
+      dbl(kx(1, 6), vy(6));
+      type("0", enter);
+      CHECK(val(pan) == 64, "typed 0: %g", val(pan));
+
+      /* the other forms: names (LFO lists, DEST by its PAGE), ratios, Hz, BEND's ranges, KIT ASSIGN's ADD */
+      click(976 + 15, 30);   /* LFO1 */
+      const double lfo[4] = {val(P_LFO), val(P_LFO + 1), val(P_LFO + 3), val(P_SYN)};
+      dbl(kx(4, 3), vy(3));
+      type("rnd", enter);
+      CHECK(val(P_LFO + 3) == 10, "LFO1 WAVE typed rnd: %g", val(P_LFO + 3));
+      dbl(kx(4, 0), vy(0));
+      type("AMP", enter);
+      dbl(kx(4, 1), vy(1));
+      type("vol", enter);
+      CHECK(val(P_LFO) == 2 && val(P_LFO + 1) == 5, "LFO1 PAGE AMP, DEST VOL: %g %g", val(P_LFO), val(P_LFO + 1));
+      dbl(kx(0, 0), vy(0));   /* FM+ STAT's 1FRQ: one of its listed ratios */
+      type("1/2", enter);
+      PA->value_to_text(P, P_SYN, val(P_SYN), t, sizeof t);
+      CHECK(!strcmp(t, "1/2"), "1FRQ typed 1/2: %s", t);
+      const double mtune = val(P_MTUNE), bend = val(P_BEND);
+      const CGFloat sx = 1224 + 128 - 12;   /* the right column's values, at each slider's top right */
+      dbl(sx, 12 + 53 * 4 + 7);
+      CHECK(field() && !strcmp(field().stringValue.UTF8String, "440.0 Hz"), "MAST TUN's field: %s", field() ? field().stringValue.UTF8String : "(none)");
+      type("441.5", enter);
+      CHECK(val(P_MTUNE) == 441.5, "MAST TUN typed 441.5: %g", val(P_MTUNE));
+      dbl(sx, 12 + 53 * 3 + 7);
+      type("1oct", enter);
+      CHECK(val(P_BEND) == 3, "BEND typed 1oct: %g", val(P_BEND));
+      const CGFloat bx = 1224 + 64, velY = 12 + 53 + 29, wx = 1214 - 178 + 8 + 54 * 2 + 27, wy = 34 + 30 + 87;
+      click(bx, velY);
+      dbl(wx, wy);
+      type("-20", enter);
+      CHECK(val(P_ASSIGN + 2) == 44, "VEL 1 ADD typed -20: %g", val(P_ASSIGN + 2));
+      dbl(wx, wy);
+      type("0", enter);
+      click(bx, velY);
+      for (int i = 0; i < 4; ++i) setp(i < 2 ? P_LFO + i : i == 2 ? P_LFO + 3 : P_SYN, lfo[i]);
+      setp(P_MTUNE, mtune);
+      setp(P_BEND, bend);
+
+      /* holding a step: the typed value is that step's lock; the kit value stays */
+      right(padx(3), PADY);
+      dbl(kx(1, 6), vy(6));
+      type("+10", enter);
+      CHECK(lockv(3, pan) == 74 && val(pan) == 64, "typed lock %d, kit %g", lockv(3, pan), val(pan));
+      click(kx(1, 6), ky(6));   /* the unit's unlock */
+      right(padx(3), PADY);
+      CHECK(lockv(3, pan) == -1, "unlocked");
+      /* with KEYBOARD CAPTURE on, the keys go to the field and come back after */
+      click(1288, 12 + 53 * 6 + 29);
+      CHECK(W.firstResponder == V, "capture on");
+      dbl(kx(1, 6), vy(6));
+      CHECK(W.firstResponder == field().currentEditor, "the field has the keys under capture");
+      type("1", enter);   /* the key that is pad 1 */
+      CHECK(val(pan) == 65 && W.firstResponder == V && !(trigs() & 1), "typed 1 under capture: %g", val(pan));
+      setp(pan, 64);
+      click(1288, 12 + 53 * 6 + 29);
+      CHECK(W.firstResponder != V, "capture off");
    }
 
    /* a host resize scales the layout */

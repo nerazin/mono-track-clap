@@ -6,6 +6,10 @@
  * locked knobs light up with inverted labels, like the unit's LCD, the others
  * dim, and turning a knob writes a lock instead of the kit value.
  *
+ * A knob's or slider's value lights up under the mouse; a double-click on it types
+ * a new one (Enter or a click elsewhere takes it, Esc drops it), a double-click
+ * elsewhere on the knob resets it.
+ *
  * Each colour has one meaning: white value, amber lock, violet host modulation,
  * red trig, green trigless step, blue a MIDI note landing on a step.
  *
@@ -24,7 +28,7 @@
 #endif
 
 /* Plug-ins share one host process, and Objective-C classes one namespace: the version keeps builds apart. */
-#define MTEditorView MonoTrackEditorView_0_6_0
+#define MTEditorView MonoTrackEditorView_0_7_0
 
 enum { C_TITLE, C_KNOB, C_TAB, C_SLIDER, C_SWITCH, C_KEYS, C_PAD, C_CLEAR, C_COPY, C_PASTE, C_LEN, C_SPEED, C_PAGE, C_SETUP, C_CLOSE, C_MAX = 160 };
 /* Controls of the setup windows have these sections: KIT ASSIGN's KEY VEL and KEY TRK tabs. */
@@ -83,7 +87,7 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
    CGContextFillEllipseInRect(g, CGRectMake(o.x + r * cos(a) - size, o.y + r * sin(a) - size, 2 * size, 2 * size));
 }
 
-@interface MTEditorView : NSView
+@interface MTEditorView : NSView <NSTextFieldDelegate>
 - (instancetype)initWithPlugin:(const clap_plugin_t *)plugin ui:(MtUi *)ui;
 - (void)startRefresh;
 - (void)stopRefresh;
@@ -104,6 +108,10 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
    uint32_t _noteSeen[UI_STEPS];
    int _page;           /* the page the pads show */
    int _setup;          /* the setup window open: 0 VEL, 1 KEY, -1 none */
+   int _hover;          /* the control whose value is under the mouse, or -1 */
+   NSTextField *_field; /* a value being typed: for control _fieldCtl, parameter _fieldId, */
+   int _fieldCtl, _fieldId;
+   uint64_t _fieldSteps;   /* or the locks of these steps, held when it opened */
    double _lenValue;    /* LEN's drag or scroll, between whole steps */
    int _dragCtl, _dragId;
    BOOL _dragMoved, _dragGesture, _scrollIsLock, _scrollDead;
@@ -136,7 +144,10 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
    _ui = ui;
    _params = plugin->get_extension(plugin, CLAP_EXT_PARAMS);
    for (int i = 0; i < NPARAM; ++i) _params->get_info(plugin, (clap_id)i, &_info[i]);
-   _dragCtl = _dragId = _scrollId = _flashCtl = _setup = -1;
+   _dragCtl = _dragId = _scrollId = _flashCtl = _setup = _hover = _fieldCtl = -1;
+   [self addTrackingArea:[[NSTrackingArea alloc] initWithRect:NSZeroRect
+                                                      options:NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect
+                                                        owner:self userInfo:nil]];
 
    for (int s = 0; s < 5; ++s) {
       const CGFloat x = 16 + 240 * s;
@@ -386,11 +397,13 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
    CGContextStrokePath(g);
    CGContextSetAlpha(g, 1);
 
-   char text[CLAP_NAME_SIZE] = "";
-   _params->value_to_text(_p, (clap_id)ident, ident == _dragId || lit ? b : eff, text, sizeof text);
+   char text[CLAP_NAME_SIZE];
+   [self valueOf:c text:text];
    char *ratio = strstr(text, " (");   /* a ratio after the value, as ENS's "+7.02 st (3/2)", goes on a second line */
    if (ratio) *ratio++ = 0;
-   NSColor *color = lit ? C(LOCK, 1) : C(MUTED, holding && lockable ? 0.6 : 1);
+   const BOOL hot = c - _c == _hover;
+   if (hot) fillRound([self valueBox:c], 3, C(MUTED, 0.3));
+   NSColor *color = lit ? C(LOCK, 1) : hot ? C(VALUE, 1) : C(MUTED, holding && lockable ? 0.6 : 1);
    drawText(text, NSMakeRect(c->r.origin.x, c->r.origin.y + 80, c->r.size.width, 14), 10, NSFontWeightRegular, color, NSTextAlignmentCenter);
    if (ratio) drawText(ratio, NSMakeRect(c->r.origin.x, c->r.origin.y + 93, c->r.size.width, 14), 10, NSFontWeightRegular, color, NSTextAlignmentCenter);
 }
@@ -398,10 +411,12 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
 - (void)drawSlider:(const Ctl *)c {
    const int ident = c->id;
    const double b = [self shown:ident], eff = [self effective:ident shown:b];
-   char text[CLAP_NAME_SIZE] = "";
-   _params->value_to_text(_p, (clap_id)ident, ident == _dragId ? b : eff, text, sizeof text);
+   char text[CLAP_NAME_SIZE];
+   [self valueOf:c text:text];
+   const BOOL hot = c - _c == _hover;
    drawText(c->label, NSMakeRect(c->r.origin.x, c->r.origin.y, 68, 14), 10, NSFontWeightMedium, C(MUTED, 1), NSTextAlignmentLeft);
-   drawText(text, NSMakeRect(c->r.origin.x + 44, c->r.origin.y, c->r.size.width - 44, 14), 10, NSFontWeightRegular, C(TEXT, 1), NSTextAlignmentRight);
+   if (hot) fillRound([self valueBox:c], 3, C(MUTED, 0.3));
+   drawText(text, NSMakeRect(c->r.origin.x + 44, c->r.origin.y, c->r.size.width - 44, 14), 10, NSFontWeightRegular, C(hot ? VALUE : TEXT, 1), NSTextAlignmentRight);
    const NSRect t = NSMakeRect(c->r.origin.x, c->r.origin.y + 20, c->r.size.width, 8);
    fillRound(t, 4, C(LINE, 1));
    const CGFloat x = t.origin.x + t.size.width * [self fraction:ident value:b];
@@ -410,6 +425,121 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
    const CGFloat xe = t.origin.x + t.size.width * [self fraction:ident value:eff];
    if (fabs(xe - x) > 0.3) fillRound(NSMakeRect(fmin(x, xe), t.origin.y + 12, fabs(xe - x), 2.5), 1, C(MOD, 1));
 }
+
+/* The value a knob or slider writes: what sounds, but while it is dragged or a held
+ * step locks it, the value it sets. */
+- (void)valueOf:(const Ctl *)c text:(char *)text {
+   const int ident = [self paramOf:c];
+   const double b = [self shown:ident];
+   text[0] = 0;
+   _params->value_to_text(_p, (clap_id)ident, ident == _dragId || [self heldLock:ident] >= 0 ? b : [self effective:ident shown:b], text, CLAP_NAME_SIZE);
+}
+/* The value's text, hugged: lit under the mouse. */
+- (NSRect)valueBox:(const Ctl *)c {
+   static CGFloat cw;   /* the monospaced font's advance */
+   if (!cw) cw = [@"0" sizeWithAttributes:@{NSFontAttributeName: [NSFont monospacedSystemFontOfSize:10 weight:NSFontWeightRegular]}].width;
+   char t[CLAP_NAME_SIZE];
+   [self valueOf:c text:t];
+   const char *ratio = strstr(t, " (");
+   const size_t n = ratio ? (size_t)(ratio - t) : strlen(t), m = ratio ? strlen(ratio + 2) : 0;
+   const CGFloat tw = cw * (n > m ? n : m);
+   if (c->kind == C_SLIDER) return NSMakeRect(NSMaxX(c->r) - tw - 4, c->r.origin.y - 1, tw + 7, 16);
+   return NSMakeRect(NSMidX(c->r) - tw / 2 - 4, c->r.origin.y + 79, tw + 8, ratio ? 29 : 16);
+}
+/* Where the mouse lights the value and a double-click types it: on a knob its whole
+ * line, so a value that just got shorter is still under a second click. */
+- (NSRect)valueArea:(const Ctl *)c {
+   const NSRect b = [self valueBox:c];
+   return c->kind == C_SLIDER ? b : NSMakeRect(c->r.origin.x, b.origin.y, c->r.size.width, b.size.height);
+}
+- (int)valueHit:(NSPoint)pt {
+   const int i = [self hit:pt];
+   if (i < 0 || (_c[i].kind != C_KNOB && _c[i].kind != C_SLIDER) || mt_ui_unused(_p, [self paramOf:&_c[i]])) return -1;
+   return NSPointInRect(pt, [self valueArea:&_c[i]]) ? i : -1;
+}
+- (void)setHover:(int)i {
+   if (_field) i = -1;
+   if (i == _hover) return;
+   if (_hover >= 0) [self setNeedsDisplayInRect:NSInsetRect(_c[_hover].r, -3, -3)];
+   if (i >= 0) [self setNeedsDisplayInRect:NSInsetRect(_c[i].r, -3, -3)];
+   _hover = i;
+}
+- (void)hoverAt:(NSEvent *)e { [self setHover:[self valueHit:[self convertPoint:e.locationInWindow fromView:nil]]]; }
+- (void)mouseMoved:(NSEvent *)e { [self hoverAt:e]; }
+- (void)mouseExited:(NSEvent *)e { (void)e; [self setHover:-1]; }
+
+/* ---- typing a value ------------------------------------------------------------ */
+
+/* A field over the value, holding its text, selected. While a step is held it types
+ * that step's lock, as turning the knob would. */
+- (void)openField:(int)i {
+   const Ctl *c = &_c[i];
+   const int ident = [self paramOf:c];
+   char t[CLAP_NAME_SIZE] = "";
+   _params->value_to_text(_p, (clap_id)ident, [self shown:ident], t, sizeof t);
+   [self endScroll];
+   const unsigned h = [self held];
+   _fieldCtl = i;
+   _fieldId = ident;
+   _fieldSteps = 0;
+   if (ident < UI_LOCKS)
+      for (int s = 0; s < UI_PAGE; ++s)
+         if (h >> s & 1) _fieldSteps |= 1ull << [self stepOf:s];
+   _edited |= h;   /* a key let go while typing is no tap */
+   const NSRect box = [self valueBox:c];
+   const CGFloat w = fmax(box.size.width + 8, c->kind == C_KNOB ? c->r.size.width : 64);
+   NSTextField *f = [NSTextField textFieldWithString:[NSString stringWithUTF8String:t]];
+   f.frame = NSMakeRect(c->kind == C_KNOB ? NSMidX(box) - w / 2 : NSMaxX(box) - w, box.origin.y, w, 17);
+   f.font = [NSFont monospacedSystemFontOfSize:10 weight:NSFontWeightRegular];
+   f.alignment = c->kind == C_KNOB ? NSTextAlignmentCenter : NSTextAlignmentRight;
+   f.bezeled = f.bordered = NO;
+   f.drawsBackground = YES;
+   f.backgroundColor = C(DARK, 1);
+   f.textColor = C(_fieldSteps ? LOCK : VALUE, 1);
+   f.focusRingType = NSFocusRingTypeNone;
+   f.cell.usesSingleLineMode = YES;
+   f.cell.scrollable = YES;
+   f.wantsLayer = YES;
+   f.layer.cornerRadius = 3;
+   f.layer.borderWidth = 1;
+   f.layer.borderColor = C(_fieldSteps ? LOCK : MUTED, 1).CGColor;
+   f.delegate = self;
+   [self setHover:-1];
+   _field = f;
+   [self addSubview:f];
+   [self.window makeKeyWindow];
+   [self.window makeFirstResponder:f];
+   if ([f.currentEditor isKindOfClass:NSTextView.class]) ((NSTextView *)f.currentEditor).insertionPointColor = C(VALUE, 1);
+}
+/* how: 0 drops the text (Esc); 1 takes it, or beeps and stays open when it reads as no
+ * value (Enter, Tab); 2 takes it if it reads (the field left any other way). */
+- (void)closeField:(int)how {
+   NSTextField *f = _field;
+   if (!f) return;
+   double v = 0;
+   const BOOL ok = how && _params->text_to_value(_p, (clap_id)_fieldId, f.stringValue.UTF8String, &v);
+   if (how == 1 && !ok) { NSBeep(); [f.currentEditor selectAll:nil]; return; }   /* selectText: would end the editing */
+   _field = nil;   /* first: giving up the focus below ends the editing, which calls back here */
+   if (ok && _fieldSteps) {
+      const int8_t x = (int8_t)lrint([self clampTo:_fieldId value:v]);
+      for (int t = 0; t < UI_STEPS; ++t)
+         if (_fieldSteps >> t & 1) atomic_store_explicit(&_ui->lock[t][_fieldId], x, memory_order_relaxed);
+      mt_ui_pattern_changed(_p);
+   } else if (ok) mt_ui_set(_p, _fieldId, v);
+   [self.window makeFirstResponder:_keys ? self : nil];
+   [f removeFromSuperview];
+   [self setNeedsDisplayInRect:NSInsetRect(NSUnionRect(f.frame, _c[_fieldCtl].r), -3, -3)];
+   _fieldCtl = -1;
+   [self tick:nil];
+}
+- (BOOL)control:(NSControl *)control textView:(NSTextView *)tv doCommandBySelector:(SEL)sel {
+   (void)control; (void)tv;
+   if (sel == @selector(cancelOperation:)) [self closeField:0];
+   else if (sel == @selector(insertNewline:) || sel == @selector(insertTab:) || sel == @selector(insertBacktab:)) [self closeField:1];
+   else return NO;
+   return YES;
+}
+- (void)controlTextDidEndEditing:(NSNotification *)n { (void)n; [self closeField:2]; }
 
 - (BOOL)switchOn:(const Ctl *)c { return c->kind == C_KEYS ? _keys : [self base:c->id] >= 0.5; }
 - (void)drawSwitch:(const Ctl *)c {
@@ -773,12 +903,13 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
    [self startRefresh];
 }
 /* A key released while another window has focus never arrives. */
-- (void)windowResigned:(NSNotification *)n { (void)n; _heldKey = 0; }
-- (void)windowBecameKey:(NSNotification *)n { (void)n; if (_keys) [self.window makeFirstResponder:self]; }
+- (void)windowResigned:(NSNotification *)n { (void)n; _heldKey = 0; [self closeField:2]; }
+- (void)windowBecameKey:(NSNotification *)n { (void)n; if (_keys && !_field) [self.window makeFirstResponder:self]; }
 - (void)windowClosing:(NSNotification *)n { (void)n; [self closeEditing]; }
 
 /* The window is going away: no trig stays held and no gesture stays open. */
 - (void)closeEditing {
+   [self closeField:2];
    _heldMouse = _heldKey = _heldLatch = 0;
    if (_dragId >= 0) [self endDrag];
    _dragCtl = -1;
@@ -855,6 +986,7 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
    if (i >= 0 && _c[i].kind == C_PAD) _heldLatch ^= 1u << _c[i].id;
 }
 - (void)mouseDown:(NSEvent *)e {
+   [self closeField:2];   /* a click elsewhere takes what was typed */
    const NSPoint pt = [self convertPoint:e.locationInWindow fromView:nil];
    const int i = [self hit:pt];
    if (_setup >= 0 && i < 0 && !NSPointInRect(pt, [self setupRect:_setup])) { [self showSetup:-1]; return; }   /* a click outside closes it */
@@ -908,6 +1040,7 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
       const int ident = [self paramOf:c];
       if (mt_ui_unused(_p, ident)) return;
       const BOOL lockEdit = [self held] && ident < UI_LOCKS;
+      if (e.clickCount == 2 && NSPointInRect(pt, [self valueArea:c])) { [self openField:i]; return; }
       if (e.clickCount == 2 && !lockEdit) {
          mt_ui_set(_p, ident, _info[ident].default_value);
          return;
@@ -923,6 +1056,7 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
       break;
    }
    }
+   [self hoverAt:e];   /* a tab or a window may have put another control here */
    [self tick:nil];
 }
 - (void)mouseDragged:(NSEvent *)e {
@@ -957,7 +1091,6 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
    [self tick:nil];
 }
 - (void)mouseUp:(NSEvent *)e {
-   (void)e;
    [self checkHolds];
    if (_dragCtl >= 0 && _c[_dragCtl].kind == C_PAD) {
       const int step = _c[_dragCtl].id;
@@ -972,6 +1105,7 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
    }
    _dragCtl = _dragId = -1;
    _dragGesture = NO;
+   [self hoverAt:e];
    [self tick:nil];
 }
 /* LEN moves by whole steps; the fraction stays for the next move. */

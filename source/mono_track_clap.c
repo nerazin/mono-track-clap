@@ -70,7 +70,7 @@ static const char *const features[] = {
    CLAP_PLUGIN_FEATURE_INSTRUMENT, CLAP_PLUGIN_FEATURE_SYNTHESIZER, CLAP_PLUGIN_FEATURE_STEREO, NULL
 };
 #define DESCRIPTOR(m) { .clap_version = CLAP_VERSION_INIT, .id = machines[m].id, .name = machines[m].name, \
-   .vendor = "Independent DSP", .url = "", .manual_url = "", .support_url = "", .version = "0.6.0", \
+   .vendor = "Independent DSP", .url = "", .manual_url = "", .support_url = "", .version = "0.7.0", \
    .description = "A whole Monomachine track: machine, EQ, filter, AMP, SRR, delay, LFOs, ported from its code", .features = features }
 static const clap_plugin_descriptor_t descriptors[MT_MACHINES] = {
    DESCRIPTOR(0), DESCRIPTOR(1), DESCRIPTOR(2), DESCRIPTOR(3), DESCRIPTOR(4), DESCRIPTOR(5), DESCRIPTOR(6), DESCRIPTOR(7),
@@ -811,6 +811,11 @@ static int parse_number(const char *text, double *x) {
    *x /= d;
    return 2;
 }
+/* a signed number, without the sign when it reads as zero ("0.0", not "+0.0" or "-0.0") */
+static void signed_text(char *out, uint32_t cap, const char *fmt, double x) {
+   snprintf(out, cap, fmt, x);
+   if ((out[0] == '+' || out[0] == '-') && out[1] && strspn(out + 1, "0.") == strlen(out + 1)) memmove(out, out + 1, strlen(out));
+}
 static bool params_to_text(const clap_plugin_t *p, clap_id cid, double v, char *out, uint32_t cap) {
    const Plugin *s = p->plugin_data;
    const int id = (int)cid, m = s->machine;
@@ -825,7 +830,7 @@ static bool params_to_text(const clap_plugin_t *p, clap_id cid, double v, char *
       case L_MULT: snprintf(out, cap, "%s", lfo_mult[k]); break;
       default: snprintf(out, cap, "%d", k); break;
       }
-   } else if (id >= P_ASSIGN) snprintf(out, cap, "%+d", (int)lrint(clamp(v, 0, 127)) - 64);   /* ADD */
+   } else if (id >= P_ASSIGN) signed_text(out, cap, "%+.0f", (double)(lrint(clamp(v, 0, 127)) - 64));   /* ADD */
    else if (is_switch(id)) snprintf(out, cap, "%s", v >= 0.5 ? "ON" : "OFF");
    else if (is_ens_pitch(m, id)) {   /* unison mutes the oscillator; the just intervals show their cents and ratio */
       const int st = ens_step(v);
@@ -840,7 +845,7 @@ static bool params_to_text(const clap_plugin_t *p, clap_id cid, double v, char *
       else ratio_text(out, cap, dyn_ratio(id, knob_word(v)), false);
    } else if (id == P_BEND) snprintf(out, cap, "%s", range_name[(int)lrint(clamp(v, 0, 7))]);
    else if (id == P_MTUNE) snprintf(out, cap, "%.1f Hz", lrint(clamp(v, 400, 499.9) * 10) / 10.0);
-   else if (bipolar(m, id)) snprintf(out, cap, "%+.1f", v - 64);
+   else if (bipolar(m, id)) signed_text(out, cap, "%+.1f", v - 64);
    else snprintf(out, cap, "%.1f", v);
    return true;
 }
@@ -903,7 +908,10 @@ static bool params_from_text(const clap_plugin_t *p, clap_id cid, const char *te
    }
    if (is_dyn_ratio(m, id)) {   /* rounded up to the next word, as the texts are cut off */
       const double k = id ? 64 * sqrt(fmax(x, 0)) : 64 * x;
-      *v = clamp(ceil(k * 65536 - 1e-6) / 65536, 0, 127);
+      double w = ceil(k * 65536 - 1e-6);
+      char t[CLAP_NAME_SIZE];   /* an exact ratio reads "1/8" or "0.0"; the cut-off ".125" or ".000" is the word above it */
+      if (params_to_text(p, cid, w / 65536, t, sizeof t) && strcmp(t, text) && params_to_text(p, cid, (w + 1) / 65536, t, sizeof t) && !strcmp(t, text)) ++w;
+      *v = clamp(w / 65536, 0, 127);
       return true;
    }
    *v = clamp(bipolar(m, id) ? x + 64 : x, lo_of(id), hi_of(id));

@@ -37,7 +37,7 @@ column holds the track's settings, including VEL and KEY SETUP, and the bottom r
 pattern. Pressing an
 LFO tab and sliding across the others switches to each one under the pointer.
 The top-left corner shows, faintly, the name, the version and the commit the
-build came from, such as `Mono Track 0.6.0 (ff94ab5)`. A `+` after the commit marks a build with
+build came from, such as `Mono Track 0.7.0 (ff94ab5)`. A `+` after the commit marks a build with
 uncommitted changes.
 
 Each LFO tab shows its LFO: the wave it plays over one cycle, on a zero line,
@@ -49,6 +49,12 @@ holds still. With DPTH at 0 the graph is dimmed.
 
 On a knob, the needle is the stored value. An amber arc goes to a lock sounding
 now, and a violet arc shows what the host's modulation adds.
+
+A knob's or slider's value lights up under the pointer. Double-click it to type
+a new value, in any form the knob reads: a number, a name (RND, AMP, VOL, 1OCT),
+a ratio (3/2, 1/8) or Hz. Enter or a click elsewhere takes it, Esc drops it, and
+text that reads as no value beeps and stays. While a step is held, the typed
+value is that step's lock. A double-click elsewhere on a knob resets it.
 
 **Trigs** run on the host's transport, one per sixteenth note at 1X, and follow
 its position. Notes come only from MIDI: a trig plays no note. It restarts the
@@ -170,7 +176,8 @@ main OS:
 
 - Knobs the unit shows as −64 to +63 read as the value − 64: TUNE, PW on PULS
   and ENS, 1FIN on FM+ STAT, 1FEN and 1VEN on FM+ DYN, DIST, PAN, BOFS, WOFS,
-  EQG and DSND. All others read 0–127.
+  EQG and DSND. Their centre reads 0.0, with no sign, as KIT ASSIGN's ADD reads 0.
+  All others read 0–127.
 - NOIS's STON and PULS's PWRS read OFF or ON (64 and up).
 - FM+ STAT's and PAR's 1FRQ, 2FRQ and 3FRQ read the listed ratio, 1/64 to 4.
 - FM+ DYN's 1FRQ and 2FRQ read their ratio as the unit writes it: a fraction
@@ -325,8 +332,9 @@ the module ASSIGN, but on no remote-control page.
 - The plug-in's own page fill (the editor's LEN and page buttons) is checked by
   the editor test, not against the firmware. The firmware checks cover the rule
   it follows and what a fill copies.
-- The 64-step pattern and the VEL and KEY SETUP windows have not been tried by
-  hand in Bitwig yet.
+- The 64-step pattern, the VEL and KEY SETUP windows and typed values have not
+  been tried by hand in Bitwig yet. Typing needs the host to pass keys to the
+  plug-in's window; the editor test types through AppKit's own field editor.
 - Velocity and key were not compared with the unit's own keyboard, whose
   velocity curve (VELOCITY CURVE in the global settings) comes before them.
 - The main CPU's and DSP's relative timing (which of a frame's three blocks a
@@ -355,8 +363,10 @@ xcrun clang -std=c11 -O1 -fobjc-arc -w -I vendor/clap/include tests/gui_test.m -
 
 `test_core` needs no firmware. `clap_test` loads the bundle and checks its
 pages, parameters, state (including states saved by 0.1.0, 0.2.0 and 0.4, which load as 16 steps at 1X, and
-0.5, which load KIT ASSIGN as a cleared kit), each section's effect on the sound, velocity and key through KIT ASSIGN, POLY, the MIDI TRIG switches, trigs and locks. `gui_test` opens the
-editor off-screen and drives it with mouse and key events. All three also pass
+0.5, which load KIT ASSIGN as a cleared kit), each section's effect on the sound, velocity and key through KIT ASSIGN, POLY, the MIDI TRIG switches, trigs and locks.
+It also checks that every value's text, typed back, reads the same: on all eight
+machines, every parameter at 2,033 values, DEST under every PAGE. `gui_test` opens the
+editor off-screen and drives it with mouse and key events, typed values included. All three also pass
 under AddressSanitizer and UBSan and as an Intel build under Rosetta, and the
 bundle passes `clap-trap` at 44.1, 48 and 96 kHz.
 

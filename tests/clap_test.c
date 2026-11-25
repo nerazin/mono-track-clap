@@ -208,18 +208,26 @@ int main(int argc, char **argv) {
          }
       }
       char text[CLAP_NAME_SIZE];
-      for (uint32_t i = 0; i < NPARAM; ++i) {   /* every value's text reads back to the same text */
+      for (uint32_t i = 0; i < NPARAM; ++i) {   /* every value's text reads back to the same text, as the editor's typing needs */
          clap_param_info_t info;
          CHECK(pa->get_info(p, i, &info), "info");
-         for (int t = 0; t < 8; ++t) {
-            const double v = info.min_value + (info.max_value - info.min_value) * t / 7;
-            const double x = info.flags & CLAP_PARAM_IS_STEPPED ? round(v) : v;
-            char back[CLAP_NAME_SIZE];
-            double y;
-            CHECK(pa->value_to_text(p, i, x, text, sizeof text), "to text");
-            CHECK(pa->text_to_value(p, i, text, &y), "from text %u '%s'", i, text);
-            CHECK(pa->value_to_text(p, i, y, back, sizeof back) && !strcmp(text, back), "param %u: '%s' -> '%s'", i, text, back);
+         const bool dest = (i >= LFO && i < LEVEL && (i - LFO) % 8 == 1) || (i >= ASSIGN && (i - ASSIGN) % 3 == 1);
+         double page_hi = 0;
+         if (dest) { clap_param_info_t pi; CHECK(pa->get_info(p, i - 1, &pi), "page info"); page_hi = pi.max_value; }
+         for (int pg = 0; pg <= page_hi; ++pg) {   /* DEST's names come from its PAGE */
+            if (dest) set_params(p, &(Set){(int)i - 1, pg}, 1);
+            for (int t = 0; t <= 16 * 127; ++t) {
+               const double v = info.min_value + (info.max_value - info.min_value) * t / (16 * 127);
+               const double x = info.flags & CLAP_PARAM_IS_STEPPED ? round(v) : v;
+               char back[CLAP_NAME_SIZE];
+               double y;
+               CHECK(pa->value_to_text(p, i, x, text, sizeof text), "to text");
+               CHECK(!((text[0] == '+' || text[0] == '-') && text[1] == '0' && strspn(text + 1, "0.") == strcspn(text + 1, " ")), "param %u at %g: a signed zero '%s'", i, x, text);
+               CHECK(pa->text_to_value(p, i, text, &y), "from text %u '%s'", i, text);
+               CHECK(pa->value_to_text(p, i, y, back, sizeof back) && !strcmp(text, back), "machine %d param %u: '%s' -> '%s'", m, i, text, back);
+            }
          }
+         if (dest) { clap_param_info_t pi; pa->get_info(p, i - 1, &pi); set_params(p, &(Set){(int)i - 1, pi.default_value}, 1); }
       }
       p->destroy(p);
    }
@@ -242,20 +250,22 @@ int main(int argc, char **argv) {
          CHECK(pe->text_to_value(e, SYN, "off", &v) && pe->value_to_text(e, SYN, v, t, sizeof t) && !strcmp(t, "OFF"), "typed off: %s", t);
          CHECK(pe->value_to_text(e, SYN + 3, 20, t, sizeof t) && !strcmp(t, "20.0"), "WAVE stays a number: %s", t);
          CHECK(pe->text_to_value(e, SYN, "3/2", &v) && pe->value_to_text(e, SYN, v, t, sizeof t) && !strcmp(t, "+7.02 st (3/2)"), "typed 3/2: %s", t);
-         CHECK(pe->value_to_text(e, SYN + 4, 64, t, sizeof t) && !strcmp(t, "+0.0"), "ENS PW is bipolar: %s", t);
+         CHECK(pe->value_to_text(e, SYN + 4, 64, t, sizeof t) && !strcmp(t, "0.0"), "ENS PW is bipolar: %s", t);
          e->destroy(e);
       }
       {   /* the SYN knobs the unit shows as words or ratios */
          static const struct { int machine, id; double v; const char *text; } shown[] = {
-            {1, SYN + 2, 63, "OFF"}, {1, SYN + 2, 64, "ON"}, {3, SYN + 6, 64, "ON"}, {3, SYN + 4, 64, "+0.0"},
+            {1, SYN + 2, 63, "OFF"}, {1, SYN + 2, 64, "ON"}, {3, SYN + 6, 64, "ON"}, {3, SYN + 4, 64, "0.0"},
             {5, SYN, 60, "1/2"}, {5, SYN, 27, "5/32"}, {5, SYN + 4, 5, "1/32"}, {5, SYN + 4, 127, "4"}, {6, SYN + 2, 85, "1.25"},
             {7, SYN, 0, "0.0"}, {7, SYN, 1, "1/64"}, {7, SYN, 3, ".046"}, {7, SYN, 64, "1.0"}, {7, SYN, 96, "1.5"}, {7, SYN, 71, "1.10"},
             {7, SYN, 127, "2.0"}, {7, SYN + 4, 2, ".001"}, {7, SYN + 4, 24, "9/64"}, {7, SYN + 4, 74, "1.33"}, {7, SYN + 4, 127, "4.0"},
-            {7, SYN + 1, 64, "+0.0"}, {7, SYN + 3, 60, "-4.0"},
+            {7, SYN + 1, 64, "0.0"}, {7, SYN + 3, 60, "-4.0"},
          };
          static const struct { int machine, id; const char *typed, *text; } typed[] = {
             {5, SYN, "3/16", "3/16"}, {5, SYN, "1.3", "1.25"}, {6, SYN + 4, "0.2", "3/16"}, {7, SYN, "1.5", "1.5"}, {7, SYN, ".3", ".300"},
             {7, SYN + 4, "9/64", "9/64"}, {7, SYN + 4, "2", "2.0"}, {7, SYN + 4, "4", "4.0"}, {1, SYN + 2, "on", "ON"},
+            {7, SYN + 1, "+0.0", "0.0"}, {7, SYN + 1, "-0", "0.0"}, {7, SYN + 1, "-0.04", "0.0"}, {7, SYN + 1, "-0.06", "-0.1"},
+            {7, SYN, ".000", ".000"}, {7, SYN + 4, ".000", ".000"}, {7, SYN, ".125", ".125"}, {7, SYN, "1/8", "1/8"}, {7, SYN, "0", "0.0"},
          };
          for (unsigned i = 0; i < sizeof shown / sizeof shown[0]; ++i) {
             const clap_plugin_t *e = create(shown[i].machine);
@@ -305,6 +315,8 @@ int main(int argc, char **argv) {
          CHECK(pa->value_to_text(p, ASSIGN + 2, 127, t, sizeof t) && !strcmp(t, "+63"), "ADD +63: %s", t);
          double v;
          CHECK(pa->text_to_value(p, ASSIGN + 2, "-10", &v) && v == 54, "typed ADD");
+         CHECK(pa->value_to_text(p, ASSIGN + 2, 64, t, sizeof t) && !strcmp(t, "0"), "ADD 0 has no sign: %s", t);
+         CHECK(pa->text_to_value(p, ASSIGN + 2, "+0", &v) && v == 64 && pa->text_to_value(p, ASSIGN + 2, "0", &v) && v == 64, "typed ADD 0");
          CHECK(pa->text_to_value(p, ASSIGN + 6, "lfo2", &v) && v == 6, "typed PAGE");
          set_params(p, (Set[]){{ASSIGN + 6, 4}}, 1);
          CHECK(pa->value_to_text(p, ASSIGN + 7, 3, t, sizeof t) && !strcmp(t, "DTIM"), "KEY 1 DEST on EFFX: %s", t);
