@@ -87,6 +87,7 @@ static void mouse(NSEventType t, CGFloat x, CGFloat y, NSEventModifierFlags m, i
    else if (t == NSEventTypeRightMouseDown) [V rightMouseDown:e];
 }
 static void click(CGFloat x, CGFloat y) { mouse(NSEventTypeLeftMouseDown, x, y, 0, 1); mouse(NSEventTypeLeftMouseUp, x, y, 0, 1); pump(); }
+static void dbl(CGFloat x, CGFloat y) { click(x, y); mouse(NSEventTypeLeftMouseDown, x, y, 0, 2); mouse(NSEventTypeLeftMouseUp, x, y, 0, 2); pump(); }
 static void right(CGFloat x, CGFloat y) { mouse(NSEventTypeRightMouseDown, x, y, 0, 1); mouse(NSEventTypeRightMouseUp, x, y, 0, 1); pump(); }
 static void key(NSEventType t, unsigned short code) {
    NSEvent *e = [NSEvent keyEventWithType:t location:NSZeroPoint modifierFlags:0 timestamp:0 windowNumber:W.windowNumber context:nil characters:@"x" charactersIgnoringModifiers:@"x" isARepeat:NO keyCode:code];
@@ -778,6 +779,27 @@ int main(int argc, char **argv) {
       P->stop_processing(P);
       P->deactivate(P);
       click(pagex(0), SCALEY);
+      /* a press slides across the pages the pattern has (40 steps: three), never onto one past the end */
+      void (^slide)(void) = ^{
+         mouse(NSEventTypeLeftMouseDown, pagex(0), SCALEY, 0, 1);
+         for (int k = 1; k < 4; ++k) mouse(NSEventTypeLeftMouseDragged, pagex(k), SCALEY, 0, 1);
+         mouse(NSEventTypeLeftMouseUp, pagex(3), SCALEY, 0, 1);
+         pump();
+      };
+      const uint64_t t5 = trigs();
+      slide();
+      click(padx(1), PADY);
+      CHECK(length() == 40 && trigs() == (t5 ^ 1ull << 33), "slide to page 3: %d", length());
+      click(padx(1), PADY);
+      /* a double-click ends the pattern with that page; a slide then stops at the new last page */
+      dbl(pagex(1), SCALEY);
+      CHECK(length() == 32, "double-click page 2: %d", length());
+      slide();
+      click(padx(1), PADY);
+      CHECK(length() == 32 && trigs() == (t5 ^ 1ull << 17), "slide past the end: %d", length());
+      click(padx(1), PADY);
+      dbl(pagex(0), SCALEY);
+      CHECK(length() == 16 && trigs() == t5, "double-click page 1: %d", length());
    }
 
    /* a host resize scales the layout */

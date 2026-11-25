@@ -20,7 +20,7 @@
 #include "mono_track_ui.h"
 
 /* Plug-ins share one host process, and Objective-C classes one namespace: the version keeps builds apart. */
-#define MTEditorView MonoTrackEditorView_0_5_1
+#define MTEditorView MonoTrackEditorView_0_5_2
 
 enum { C_TITLE, C_KNOB, C_TAB, C_SLIDER, C_SWITCH, C_KEYS, C_PAD, C_CLEAR, C_COPY, C_PASTE, C_LEN, C_SPEED, C_PAGE, C_MAX = 128 };
 typedef struct { int kind, id, section; NSRect r; const char *label; } Ctl;
@@ -795,9 +795,10 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
       _dragCtl = i;
       break;
    case C_TAB: _tab = c->id; _dragCtl = i; break;
-   case C_PAGE:
-      if (c->id > [self lastPage]) mt_ui_set_length(_p, UI_PAGE * (c->id + 1));   /* the unit's SCALE: whole pages */
+   case C_PAGE:   /* past the end, or a double-click: the pattern ends with this page, as the unit's SCALE sets whole pages */
+      if (c->id > [self lastPage] || e.clickCount == 2) mt_ui_set_length(_p, UI_PAGE * (c->id + 1));
       [self showPage:c->id];
+      _dragCtl = i;
       break;
    case C_SPEED:
       atomic_store_explicit(&_ui->speed, (int8_t)((atomic_load_explicit(&_ui->speed, memory_order_relaxed) + 1) & 3), memory_order_relaxed);
@@ -855,6 +856,11 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
    if (_dragCtl >= 0 && _c[_dragCtl].kind == C_TAB) {   /* a press on a tab selects whichever tab it slides onto */
       const int i = [self hit:pt];
       if (i >= 0 && _c[i].kind == C_TAB && _c[i].id != _tab) { _tab = _c[i].id; [self tick:nil]; }
+      return;
+   }
+   if (_dragCtl >= 0 && _c[_dragCtl].kind == C_PAGE) {   /* the same for pages, but only those the pattern has */
+      const int i = [self hit:pt];
+      if (i >= 0 && _c[i].kind == C_PAGE && _c[i].id != _page && _c[i].id <= [self lastPage]) { [self showPage:_c[i].id]; [self tick:nil]; }
       return;
    }
    if (_dragCtl >= 0 && _c[_dragCtl].kind == C_LEN) {   /* 62 steps over 200 points, as a knob's range */

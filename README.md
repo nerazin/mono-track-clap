@@ -71,6 +71,8 @@ A pattern has 2 to 64 steps in pages of 16, and the pads show one page.
 | Drag or scroll **LEN** | Set the length, 2 to 64 steps. Shift for fine. Double-click for 16. |
 | Click the speed (**1X**) | Cycle 1X, 2X, 3/4X and 3/2X. A step is then a sixteenth, a thirty-second, an eighth-note triplet or a sixteenth-note triplet. |
 | Click page **1** to **4** | Show that page on the pads. A page past the end extends the pattern to the end of that page, as the unit's SCALE setting does. |
+| Press a page and slide across the others | Show each page under the pointer, as the LFO tabs do. The slide only reaches pages the pattern has; it never extends it. |
+| Double-click page **1** to **4** | End the pattern with that page: 16, 32, 48 or 64 steps. The steps after it stay, dimmed. |
 
 When the pattern grows onto a page that holds nothing, that page is filled from a
 lower one, as on the unit: page 2 from page 1, page 3 from page 1, page 4 from
