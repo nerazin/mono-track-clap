@@ -1,9 +1,9 @@
 /* Regression test for mono_track.h that needs no firmware.
  *
  * The expected hashes come from Monomachine OS 1.32B itself. For each machine
- * the stimulus in stimulus.h (notes, bends, tempo, and moves of every knob on
- * every page and every LFO parameter) went through the firmware's whole track
- * in an emulator, and the 32 output words of each block were hashed. The
+ * the stimulus in stimulus.h (notes, bends, tempo, moves of every knob on
+ * every page and every LFO parameter, and for the FX machines noise into the
+ * input) went through the firmware's whole track in an emulator, and the 32 output words of each block were hashed. The
  * main-CPU hashes come from running the main OS's own LFO, apply and slew code
  * in a 68020 emulator (lab golden_host.py), the second with KIT ASSIGN's VEL and
  * KEY rows. */
@@ -12,7 +12,8 @@
 #include "../source/mono_track.h"
 #include "stimulus.h"
 
-static const uint32_t expect_track[MT_MACHINES] = {0xa26f567au, 0x8180bae7u, 0xb5c3f419u, 0xcafa0803u, 0x4ce5591du, 0xb9032731u, 0x6fc356dau, 0x99005988u};
+static const uint32_t expect_track[MT_MACHINES] = {0xa26f567au, 0x8180bae7u, 0xb5c3f419u, 0xcafa0803u, 0x4ce5591du, 0xb9032731u, 0x6fc356dau, 0x99005988u,
+   0x7ffe5b3bu, 0xb27d9859u, 0xd5df00b7u, 0x269ef810u, 0x3013359au, 0xe2667fceu, 0x88c4c553u};
 #define EXPECT_TABLE 0x00e321fau
 #define EXPECT_HOST 0xe67ee683u
 #define EXPECT_HOST_ASSIGN 0xa3b94baau
@@ -66,9 +67,11 @@ int main(void) {
       st_seed = 1000u + (uint32_t)m;
       st_kit(&h, m);
       mt_reset(&track, m, h.word[W_PITCH]);
+      st_in_seed = 99;
       uint32_t x = 2166136261u;
       for (long b = 0; b < 12000; ++b) {
          if (b % 3 == 0) st_frame(&h, b / 3);
+         if (MT_FX(m)) st_input(b, track.in, track.ext);
          int32_t out[2][MT_FRAMES];
          mt_block(&track, h.block, out);
          for (int i = 0; i < MT_FRAMES; ++i) { x = st_fnv(x, out[0][i]); x = st_fnv(x, out[1][i]); }
@@ -92,6 +95,6 @@ int main(void) {
             }
          }
       }
-   puts(bad ? "FAILED" : "PASS: tables, main CPU and all eight tracks match the firmware's hashes; the playhead keeps its place");
+   puts(bad ? "FAILED" : "PASS: tables, main CPU and all fifteen tracks match the firmware's hashes; the playhead keeps its place");
    return bad;
 }

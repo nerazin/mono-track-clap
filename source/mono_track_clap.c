@@ -1,5 +1,7 @@
-/* Mono Track: a whole Monomachine track around each synth machine, as eight
- * CLAP instruments in one bundle.
+/* Mono Track: a whole Monomachine track around each machine, as fifteen CLAP
+ * plug-ins in one bundle: eight instruments around the synth machines, and
+ * seven audio effects around the FX machines, which take the host's audio as
+ * the track's input (INP A+B) and RINGMOD's EXT from a sidechain.
  *
  * mono_track.h is the track, a fixed-point port of OS 1.32B: machine, EQ,
  * filter + DIST, AMP, SRR, delay, LEVEL, the filter envelope and key tracking,
@@ -42,6 +44,13 @@ static const Machine machines[MT_MACHINES] = {
    {"works.reconstruction.monotrack.fmstat", "Mono Track FM+ STAT", "MTFS", {"1FRQ", "1FIN", "1ENV", "1FB", "2FRQ", "2VOL", "TONE", "TUNE"}, {60, 64, 80, 30, 80, 64, 98, 64}, 0, 0x82},
    {"works.reconstruction.monotrack.fmpar", "Mono Track FM+ PAR", "MTFP", {"1FRQ", "1ENV", "2FRQ", "2ENV", "3FRQ", "3ENV", "TONE", "TUNE"}, {60, 64, 80, 64, 102, 80, 98, 64}, 0, 0x80},
    {"works.reconstruction.monotrack.fmdyn", "Mono Track FM+ DYN", "MTFD", {"1FRQ", "1FEN", "1VOL", "1VEN", "2FRQ", "2ENV", "2FB", "TUNE"}, {64, 64, 64, 64, 74, 80, 30, 64}, 0, 0x8a},
+   {"works.reconstruction.monotrack.thru", "Mono Track FX THRU", "MTTH", {"-", "-", "-", "-", "-", "-", "-", "INP"}, {0, 0, 0, 0, 0, 0, 0, 64}, 0x7f, 0},
+   {"works.reconstruction.monotrack.reverb", "Mono Track FX REVERB", "MTRV", {"DEC", "DAMP", "GATE", "MIX", "HP", "LP", "-", "INP"}, {64, 2, 127, 32, 0, 127, 0, 64}, 0x40, 0},
+   {"works.reconstruction.monotrack.chorus", "Mono Track FX CHORUS", "MTCH", {"DEL", "DEP", "SPD", "MIX", "FB", "WID", "LP", "INP"}, {64, 64, 64, 127, 0, 0, 127, 64}, 0, 0x80},
+   {"works.reconstruction.monotrack.dynamix", "Mono Track FX DYNAMIX", "MTDX", {"ATK", "REL", "THRS", "MIX", "RAT", "GAIN", "RMS", "INP"}, {64, 64, 64, 127, 0, 0, 0, 64}, 0, 0x80},
+   {"works.reconstruction.monotrack.ringmod", "Mono Track FX RINGMOD", "MTRM", {"WAVE", "EXT", "-", "MIX", "-", "-", "-", "INP"}, {0, 0, 0, 0, 0, 0, 0, 64}, 0x74, 0x80},
+   {"works.reconstruction.monotrack.phaser", "Mono Track FX PHASER", "MTPH", {"CNTR", "DEP", "SPD", "MIX", "FB", "WID", "-", "INP"}, {64, 64, 64, 127, 45, 0, 127, 64}, 0x40, 0x91},
+   {"works.reconstruction.monotrack.flanger", "Mono Track FX FLANGER", "MTFL", {"DEL", "DEP", "SPD", "MIX", "FB", "WID", "-", "INP"}, {64, 64, 64, 127, 45, 0, 127, 64}, 0x40, 0x90},
 };
 static const char *const page_name[4] = {"SYN", "AMP", "FILT", "EFX"};
 static const char *const knob_label[3][8] = {
@@ -66,25 +75,37 @@ static const char *const track_label[10] = {"LEVEL", "LP KEY", "HP KEY", "BEND",
 static const char *const assign_field[3] = {"PAGE", "DEST", "ADD"};
 static const unsigned char assign_def[12] = {2, 5, 64, 0, 0, 64, 1, 0, 64, 0, 0, 64};
 
-static const char *const features[] = {
-   CLAP_PLUGIN_FEATURE_INSTRUMENT, CLAP_PLUGIN_FEATURE_SYNTHESIZER, CLAP_PLUGIN_FEATURE_STEREO, NULL
+static const char *const features[MT_MACHINES][4] = {
+#define SYNTH {CLAP_PLUGIN_FEATURE_INSTRUMENT, CLAP_PLUGIN_FEATURE_SYNTHESIZER, CLAP_PLUGIN_FEATURE_STEREO, NULL}
+#define FX(f) {CLAP_PLUGIN_FEATURE_AUDIO_EFFECT, f, CLAP_PLUGIN_FEATURE_STEREO, NULL}
+   SYNTH, SYNTH, SYNTH, SYNTH, SYNTH, SYNTH, SYNTH, SYNTH,
+   FX(CLAP_PLUGIN_FEATURE_FILTER), FX(CLAP_PLUGIN_FEATURE_REVERB), FX(CLAP_PLUGIN_FEATURE_CHORUS), FX(CLAP_PLUGIN_FEATURE_COMPRESSOR),
+   FX(CLAP_PLUGIN_FEATURE_DISTORTION), FX(CLAP_PLUGIN_FEATURE_PHASER), FX(CLAP_PLUGIN_FEATURE_FLANGER),
+#undef SYNTH
+#undef FX
 };
 #define DESCRIPTOR(m) { .clap_version = CLAP_VERSION_INIT, .id = machines[m].id, .name = machines[m].name, \
-   .vendor = "Independent DSP", .url = "", .manual_url = "", .support_url = "", .version = "0.7.0", \
-   .description = "A whole Monomachine track: machine, EQ, filter, AMP, SRR, delay, LFOs, ported from its code", .features = features }
+   .vendor = "Independent DSP", .url = "", .manual_url = "", .support_url = "", .version = "0.8.0", \
+   .description = MT_FX(m) ? "A whole Monomachine track around an FX machine: machine, EQ, filter, AMP, SRR, delay, LFOs, ported from its code" \
+                           : "A whole Monomachine track: machine, EQ, filter, AMP, SRR, delay, LFOs, ported from its code", .features = features[m] }
 static const clap_plugin_descriptor_t descriptors[MT_MACHINES] = {
    DESCRIPTOR(0), DESCRIPTOR(1), DESCRIPTOR(2), DESCRIPTOR(3), DESCRIPTOR(4), DESCRIPTOR(5), DESCRIPTOR(6), DESCRIPTOR(7),
+   DESCRIPTOR(8), DESCRIPTOR(9), DESCRIPTOR(10), DESCRIPTOR(11), DESCRIPTOR(12), DESCRIPTOR(13), DESCRIPTOR(14),
 };
 
 #define NATIVE 44100.0
 #define HISTORY 4096        /* resampler input ring */
 #define PHASES 128
+#define QUEUE 8192          /* FX at other rates: the output frames waiting (pending) */
 #define NOIS_START 2048     /* blocks: NOIS's red integrator filling */
 #define ENS_START 64        /* blocks: ENS's chorus unmuting */
+#define RINGMOD_START 4     /* blocks: RINGMOD's first sine read, from outside its table */
 
 static double clamp(double x, double lo, double hi) { return x < lo ? lo : x > hi ? hi : x; }
 static double def_of(int m, int id) {
    if (id < P_AMP) return machines[m].def[id];
+   if (MT_FX(m) && (id == P_AMP + W_DEC || id == P_AMP + W_REL || id == P_LPKEY || id == P_HPKEY))
+      return id < P_LFO ? 127 : 0;   /* an effect: the envelope held open, the filter not following notes */
    if (id < P_LFO) return knob_def[id / 8 - 1][id % 8];
    if (id < P_LEVEL) return lfo_def[(id - P_LFO) % 8];
    if (id >= P_ASSIGN) return assign_def[id - P_ASSIGN];
@@ -116,7 +137,7 @@ typedef struct { double x[2]; } Frame;
 typedef struct {
    float *kernel;
    Frame history[HISTORY];
-   double ratio;   /* output n is the input at n x ratio */
+   double ratio, offset;   /* output n is the input at n x ratio - offset */
    int half, taps;
    int64_t last;
    uint64_t index;
@@ -124,6 +145,7 @@ typedef struct {
 
 static bool rs_prepare(Resampler *r, double from, double to) {
    r->ratio = from / to;
+   r->offset = 0;
    r->half = (int)ceil(40.0 * fmax(1.0, r->ratio));
    r->taps = 2 * r->half;
    if (r->taps + 2 >= HISTORY) return false;
@@ -145,9 +167,10 @@ static bool rs_prepare(Resampler *r, double from, double to) {
 }
 static void rs_reset(Resampler *r) { memset(r->history, 0, sizeof r->history); r->last = -1; r->index = 0; }
 static void rs_push(Resampler *r, Frame f) { r->history[(size_t)(++r->last) & (HISTORY - 1)] = f; }
-static bool rs_ready(const Resampler *r) { return (int64_t)floor((double)r->index * r->ratio) + r->half <= r->last; }
+static double rs_pos(const Resampler *r) { return (double)r->index * r->ratio - r->offset; }
+static bool rs_ready(const Resampler *r) { return (int64_t)floor(rs_pos(r)) + r->half <= r->last; }
 static Frame rs_pop(Resampler *r) {
-   const double pos = (double)r->index * r->ratio, pp = (pos - floor(pos)) * PHASES;
+   const double pos = rs_pos(r), pp = (pos - floor(pos)) * PHASES;
    r->index++;
    const int64_t base = (int64_t)floor(pos);
    const int phase = (int)fmin(PHASES - 1, (int)pp);
@@ -202,7 +225,7 @@ typedef struct {
    double mod[NPARAM];
    /* audio thread */
    bool active, direct, poly;
-   uint32_t latency, blocks;
+   uint32_t latency, blocks, warmup;
    int pos;
    int bend;                          /* the pitch bend's top 8 bits, 128 at the centre */
    double tempo, rate;
@@ -216,7 +239,11 @@ typedef struct {
    bool queued;
    Voice voice[MT_VOICES];
    double out[2][MT_FRAMES];
-   Resampler down;
+   /* FX: the input of the block being collected (its first frame computes the block before) and EXT one sample behind */
+   int32_t in[2][MT_FRAMES], ext[2][MT_FRAMES], ext_last[2];
+   uint64_t frames, qread, qwrite;
+   Resampler down, up, up_ext;
+   Frame pending[QUEUE];
 } Plugin;
 
 #ifdef MT_CHECK   /* the lab's firmware comparison sees every block */
@@ -231,13 +258,21 @@ static void set_value(Plugin *s, int id, double x) { atomic_store_explicit(&s->v
 /* Block word 42 for a tempo, as the CPU sends it: 24 x BPM, the tempo kept to 30..300. */
 static int32_t tick_of(double bpm) { return (int32_t)clamp(lround(24.0 * bpm), 720, 7200); }
 
-/* The machine's own start, which on the unit is long over by the first note. */
+/* The machine's own start, which on the unit is long over by the first note:
+ * an FX machine's mute or gain ramp, run on silence. */
 static void machine_start(Plugin *s, Voice *v) {
 #ifndef MT_NO_START
    MonoTrack *t = &v->track;
    const int32_t *syn = v->cpu.block + W_SYN;
    int32_t x[2][MT_FRAMES] = {{0}};
-   if (s->machine == MT_NOIS)
+   if (MT_FX(s->machine)) {
+      static const short start[MT_MACHINES - MT_THRU] = {0, MR_START, MH_GATE, MX_SETTLE, RINGMOD_START, 0, MFL_GATE};
+      const int32_t in[2][MT_FRAMES] = {{0}}, ext[2][MT_FRAMES] = {{0}};
+      memcpy(t->in, in, sizeof in);
+      memcpy(t->ext, ext, sizeof ext);
+      mt_machine_init(t, syn);
+      for (int n = 0; n < start[s->machine - MT_THRU]; ++n) mt_fx(t, syn, (v->note << 11) / 12 + 340, x);
+   } else if (s->machine == MT_NOIS)
       for (int n = 0; n < NOIS_START; ++n) mg_block(&t->gnd, syn, 0, x);
    else if (s->machine == MT_ENS) {
       int32_t pan[2];
@@ -301,7 +336,7 @@ static void control_frame(Plugin *s, Voice *v) {
    h->word[W_RECIP] = 0x800000 / tick;
    h->word[W_PITCH] = (v->note << 11) / 12;
    h->word[W_MTUNE] = mf_master_tune((int)lrint(clamp(value(s, P_MTUNE) * 10, 4000, 4999)));
-   h->word[W_ROUTE] = 1 | (value(s, P_LPKEY) >= 0.5 ? MT_LP_KEY : 0) | (value(s, P_HPKEY) >= 0.5 ? MT_HP_KEY : 0);
+   h->word[W_ROUTE] = 1 | (MT_FX(s->machine) ? MT_INP_AB : 0) | (value(s, P_LPKEY) >= 0.5 ? MT_LP_KEY : 0) | (value(s, P_HPKEY) >= 0.5 ? MT_HP_KEY : 0);
    const unsigned news = v->pending;
    h->word[W_NOTE] = news & PEND_ON ? 0x81 : news & PEND_OFF ? 0x02 : 0;
    h->word[W_FTRIG] = (news & PEND_FILT) != 0;
@@ -314,6 +349,7 @@ static void control_frame(Plugin *s, Voice *v) {
    }
    if (start) {   /* the machine's assignment: its init and trig routines, the glide at the note, the AMP idle */
       mt_reset(&v->track, s->machine, h->word[W_PITCH]);
+      if (MT_FX(s->machine) && !v->quick) v->track.amp.stage = 0;   /* an effect open from the start: the attack the AMP's RAM at 0 begins at power-on */
       md_settle(&v->track.delay, h->knob[24 + 3], (uint32_t)tick);
       h->word[W_NOTE] |= 0x80;
    }
@@ -355,8 +391,13 @@ static void poly_sync(Plugin *s) {
    }
 }
 
-/* One frame at 44.1 kHz; a block is computed at its first frame. */
-static void native_frame(Plugin *s, double out[2]) {
+static int32_t word_of(double x) { return (int32_t)lrint(clamp(isfinite(x) ? x : 0, -1.0, 0.99999988) * 8388608.0); }
+
+/* One frame at 44.1 kHz; a block is computed at its first frame. An FX track's
+ * block takes the 16 input frames before it: one block of latency. in: the
+ * input and the sidechain (RINGMOD's EXT, read one sample behind). */
+static void native_frame(Plugin *s, const double in[4], double out[2]) {
+   const bool fx = MT_FX(s->machine);
    if (s->pos == 0) {
       const bool frame_start = s->blocks % 3 == 0;
       if (frame_start) poly_sync(s);
@@ -365,6 +406,10 @@ static void native_frame(Plugin *s, double out[2]) {
       for (int n = 0; n < voices; ++n) {
          Voice *v = &s->voice[n];
          if (frame_start) control_frame(s, v);
+         if (fx) {
+            memcpy(v->track.in, s->in, sizeof s->in);
+            memcpy(v->track.ext, s->ext, sizeof s->ext);
+         }
          mt_block(&v->track, v->cpu.block, v->y);
 #ifdef MT_CHECK
          if (mt_check_hook) mt_check_hook(&v->track, v->cpu.block, (const int32_t (*)[MT_FRAMES])v->y);
@@ -382,21 +427,53 @@ static void native_frame(Plugin *s, double out[2]) {
             s->out[c][i] = sum / 8388608.0;
          }
    }
+   if (fx)
+      for (int c = 0; c < 2; ++c) {
+         s->in[c][s->pos] = word_of(in[c]);
+         s->ext[c][s->pos] = s->ext_last[c];
+         s->ext_last[c] = word_of(in[2 + c]);
+      }
    out[0] = s->out[0][s->pos];
    out[1] = s->out[1][s->pos];
    s->pos = (s->pos + 1) % MT_FRAMES;
 }
 
-static void host_frame(Plugin *s, double out[2]) {
-   if (s->direct) { native_frame(s, out); return; }
-   while (!rs_ready(&s->down)) {
-      Frame f;
-      native_frame(s, f.x);
-      rs_push(&s->down, f);
+/* One host frame. An instrument computes 44.1 kHz frames as the output needs
+ * them; an effect takes its input through `up` (and `up_ext`) first and its
+ * output reaches the host `latency` frames late. */
+static void host_frame(Plugin *s, const double in[4], double out[2]) {
+   static const double none[4] = {0, 0, 0, 0};
+   if (s->direct) { native_frame(s, in, out); return; }
+   if (!MT_FX(s->machine)) {
+      while (!rs_ready(&s->down)) {
+         Frame f;
+         native_frame(s, none, f.x);
+         rs_push(&s->down, f);
+      }
+      const Frame f = rs_pop(&s->down);
+      out[0] = f.x[0];
+      out[1] = f.x[1];
+      return;
    }
-   const Frame f = rs_pop(&s->down);
-   out[0] = f.x[0];
-   out[1] = f.x[1];
+   const bool ext = s->machine == MT_RINGMOD;
+   rs_push(&s->up, (Frame){{in[0], in[1]}});
+   if (ext) rs_push(&s->up_ext, (Frame){{in[2], in[3]}});
+   while (rs_ready(&s->up)) {
+      const Frame f = rs_pop(&s->up), g = ext ? rs_pop(&s->up_ext) : (Frame){{0, 0}};
+      const double x[4] = {f.x[0], f.x[1], g.x[0], g.x[1]};
+      Frame y;
+      native_frame(s, x, y.x);
+      rs_push(&s->down, y);
+      while (rs_ready(&s->down))
+         if (s->qwrite - s->qread < QUEUE) s->pending[(s->qwrite++) & (QUEUE - 1)] = rs_pop(&s->down);
+         else rs_pop(&s->down);
+   }
+   out[0] = out[1] = 0;
+   if (s->frames++ >= s->warmup && s->qread != s->qwrite) {
+      const Frame f = s->pending[(s->qread++) & (QUEUE - 1)];
+      out[0] = f.x[0];
+      out[1] = f.x[1];
+   }
 }
 
 static void seq_clear(Plugin *s) {
@@ -424,7 +501,14 @@ static void reset(Plugin *s) {
    s->seq_clock = SEQ_STOPPED;
    seq_clear(s);
    atomic_store_explicit(&s->ui.step, -1, memory_order_relaxed);
+   memset(s->in, 0, sizeof s->in);
+   memset(s->ext, 0, sizeof s->ext);
+   memset(s->ext_last, 0, sizeof s->ext_last);
+   memset(s->out, 0, sizeof s->out);
+   s->frames = s->qread = s->qwrite = 0;
    rs_reset(&s->down);
+   rs_reset(&s->up);
+   rs_reset(&s->up_ext);
 }
 
 /* What a MIDI note trigs: the three MIDI TRIG switches. */
@@ -557,6 +641,8 @@ static void plug_destroy(const clap_plugin_t *p) {
    if (s->gui) mt_gui_destroy(s->gui);
 #endif
    free(s->down.kernel);
+   free(s->up.kernel);
+   free(s->up_ext.kernel);
    free(s);
 }
 static bool plug_activate(const clap_plugin_t *p, double rate, uint32_t min, uint32_t max) {
@@ -565,11 +651,24 @@ static bool plug_activate(const clap_plugin_t *p, double rate, uint32_t min, uin
    if (s->active || !isfinite(rate) || rate < 8000 || rate > 768000) return false;
    s->direct = rate == NATIVE;
    s->rate = rate;
-   uint32_t latency = 0;
+   const bool fx = MT_FX(s->machine);
+   uint32_t latency = fx ? MT_FRAMES : 0, warmup = 0;
    if (!s->direct) {
-      if (!rs_prepare(&s->down, NATIVE, rate)) { free(s->down.kernel); s->down.kernel = NULL; return false; }
-      latency = (uint32_t)lround(s->down.half * rate / NATIVE);   /* the resampler reads that far ahead */
+      const bool ok = rs_prepare(&s->down, NATIVE, rate) && (!fx || rs_prepare(&s->up, rate, NATIVE))
+                   && (s->machine != MT_RINGMOD || rs_prepare(&s->up_ext, rate, NATIVE));
+      if (!ok) {
+         free(s->down.kernel); free(s->up.kernel); free(s->up_ext.kernel);
+         s->down.kernel = s->up.kernel = s->up_ext.kernel = NULL;
+         return false;
+      }
+      if (fx) {   /* as the FX plug-ins: the block is 16 x rate / 44100 host frames, read that much earlier that it is whole */
+         warmup = (uint32_t)(s->up.half + ceil(s->down.half * rate / NATIVE) + 2);
+         const uint32_t block = (uint32_t)ceil(MT_FRAMES * rate / NATIVE - 1e-9);
+         s->down.offset = block * NATIVE / rate - MT_FRAMES;
+         latency = warmup + block;
+      } else latency = (uint32_t)lround(s->down.half * rate / NATIVE);   /* the resampler reads that far ahead */
    }
+   s->warmup = warmup;
    reset(s);
    s->active = true;
    if (latency != s->latency) {
@@ -581,8 +680,8 @@ static bool plug_activate(const clap_plugin_t *p, double rate, uint32_t min, uin
 }
 static void plug_deactivate(const clap_plugin_t *p) {
    Plugin *s = p->plugin_data;
-   free(s->down.kernel);
-   s->down.kernel = NULL;
+   free(s->down.kernel); free(s->up.kernel); free(s->up_ext.kernel);
+   s->down.kernel = s->up.kernel = s->up_ext.kernel = NULL;
    s->active = false;
 }
 static bool plug_start(const clap_plugin_t *p) { (void)p; return true; }
@@ -687,8 +786,13 @@ static clap_process_status plug_process(const clap_plugin_t *p, const clap_proce
          if (h && h->time > n) break;
          event(s, h);
       }
-      double y[2];
-      host_frame(s, y);
+      double x[4] = {0, 0, 0, 0}, y[2];
+      for (uint32_t port = 0; port < 2 && port < pr->audio_inputs_count && MT_FX(s->machine); ++port) {   /* a missing input is silence */
+         const clap_audio_buffer_t *b = &pr->audio_inputs[port];
+         for (uint32_t c = 0; c < 2 && c < b->channel_count; ++c)
+            x[2 * port + c] = b->data32 && b->data32[c] ? b->data32[c][n] : b->data64 && b->data64[c] ? b->data64[c][n] : 0;
+      }
+      host_frame(s, x, y);
       for (int c = 0; c < 2; ++c)
          if (out->data32) out->data32[c][n] = (float)y[c]; else out->data64[c][n] = y[c];
    }
@@ -700,13 +804,17 @@ static clap_process_status plug_process(const clap_plugin_t *p, const clap_proce
 
 /* ---- extensions ------------------------------------------------------------ */
 
-static uint32_t ports_count(const clap_plugin_t *p, bool input) { (void)p; return input ? 0 : 1; }
+/* An effect has the main input, and RINGMOD a sidechain for EXT too. */
+static uint32_t ports_count(const clap_plugin_t *p, bool input) {
+   const int m = ((const Plugin *)p->plugin_data)->machine;
+   return !input ? 1 : !MT_FX(m) ? 0 : m == MT_RINGMOD ? 2 : 1;
+}
 static bool ports_get(const clap_plugin_t *p, uint32_t i, bool input, clap_audio_port_info_t *port) {
    if (i >= ports_count(p, input) || !port) return false;
    memset(port, 0, sizeof *port);
-   port->id = 0;
-   snprintf(port->name, sizeof port->name, "Stereo Out");
-   port->flags = CLAP_AUDIO_PORT_IS_MAIN | CLAP_AUDIO_PORT_SUPPORTS_64BITS | CLAP_AUDIO_PORT_REQUIRES_COMMON_SAMPLE_SIZE;
+   port->id = i;
+   snprintf(port->name, sizeof port->name, "%s", !input ? "Stereo Out" : i ? "Ext In" : "Stereo In");
+   port->flags = (i ? 0 : CLAP_AUDIO_PORT_IS_MAIN) | CLAP_AUDIO_PORT_SUPPORTS_64BITS | CLAP_AUDIO_PORT_REQUIRES_COMMON_SAMPLE_SIZE;
    port->channel_count = 2;
    port->port_type = CLAP_PORT_STEREO;
    port->in_place_pair = CLAP_INVALID_ID;

@@ -28,7 +28,7 @@
 #endif
 
 /* Plug-ins share one host process, and Objective-C classes one namespace: the version keeps builds apart. */
-#define MTEditorView MonoTrackEditorView_0_7_0
+#define MTEditorView MonoTrackEditorView_0_8_0
 
 enum { C_TITLE, C_KNOB, C_TAB, C_SLIDER, C_SWITCH, C_KEYS, C_PAD, C_CLEAR, C_COPY, C_PASTE, C_LEN, C_SPEED, C_PAGE, C_SETUP, C_CLOSE, C_MAX = 160 };
 /* Controls of the setup windows have these sections: KIT ASSIGN's KEY VEL and KEY TRK tabs. */

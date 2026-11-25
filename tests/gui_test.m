@@ -23,7 +23,9 @@
  *  - a knob's or slider's value lights up under the mouse; a double-click on it types a
  *    new one in any of its forms (numbers, names, ratios, Hz), Enter or a click elsewhere
  *    takes it, Esc drops it, text that reads as no value beeps; while a step is held it
- *    types the lock; a double-click elsewhere on the knob still resets it */
+ *    types the lock; a double-click elsewhere on the knob still resets it
+ *  - an FX machine's editor (PHASER): its unused knob takes no typing, its INP
+ *    reads 0.0 at 64 and takes a typed -6 */
 #import <Cocoa/Cocoa.h>
 #include <dlfcn.h>
 #include <objc/runtime.h>
@@ -1012,6 +1014,43 @@ int main(int argc, char **argv) {
    CHECK(W.contentView.subviews.count == 0, "removed");
    [W close];
    P->destroy(P);
+
+   /* an FX machine's editor */
+   {
+      P = f->create_plugin(f, &host, "works.reconstruction.monotrack.phaser");
+      CHECK(P && P->init(P), "create PHASER");
+      PA = P->get_extension(P, CLAP_EXT_PARAMS);
+      const clap_plugin_gui_t *g = P->get_extension(P, CLAP_EXT_GUI);
+      CHECK(g->create(P, CLAP_WINDOW_API_COCOA, false), "PHASER gui");
+      W = [[NSWindow alloc] initWithContentRect:NSMakeRect(-6000, -6000, MT_GUI_W, MT_GUI_H) styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
+      W.releasedWhenClosed = NO;
+      clap_window_t pw = {CLAP_WINDOW_API_COCOA, {(__bridge void *)W.contentView}};
+      CHECK(g->set_parent(P, &pw) && g->show(P), "PHASER parent/show");
+      V = W.contentView.subviews.firstObject;
+      CHECK(V, "the PHASER editor view");
+      shot(dir, "16_fx_phaser");
+      NSTextField *(^field)(void) = ^NSTextField *(void) {
+         for (NSView *sub in V.subviews) if ([sub isKindOfClass:NSTextField.class]) return (NSTextField *)sub;
+         return nil;
+      };
+      CGFloat (^vy)(int) = ^CGFloat(int k) { return 52 + (k / 4) * 106 + 87; };
+      dbl(kx(0, 6), vy(6));
+      CHECK(!field(), "the unused knob opened a field");
+      char t[CLAP_NAME_SIZE];
+      CHECK(PA->value_to_text(P, P_SYN + 7, 64, t, sizeof t) && !strcmp(t, "0.0"), "PHASER INP at 64 reads %s", t);
+      dbl(kx(0, 7), vy(7));
+      NSTextField *fd = field();
+      CHECK(fd && !strcmp(fd.stringValue.UTF8String, "0.0"), "INP's field: %s", fd ? fd.stringValue.UTF8String : "none");
+      NSTextView *ed = (NSTextView *)fd.currentEditor;
+      [ed selectAll:nil];
+      [ed insertText:@"-6" replacementRange:ed.selectedRange];
+      [ed doCommandBySelector:@selector(insertNewline:)];
+      pump();
+      CHECK(val(P_SYN + 7) == 58 && !field(), "typed INP -6: %g", val(P_SYN + 7));
+      g->destroy(P);
+      [W close];
+      P->destroy(P);
+   }
    entry->deinit();
    }
    puts("PASS");

@@ -7,6 +7,10 @@
  *   pitch (glide, TUNE, master tune, word 30) -> machine -> EQ -> filter + DIST
  *   -> AMP (envelope, VOL, PAN) -> SRR -> ENS's chorus -> delay -> LEVEL -> out
  *
+ * An FX machine (THRU, REVERB, CHORUS, DYNAMIX, RINGMOD, PHASER, FLANGER) takes
+ * the track's input, `in`, as its INP A+B routing reads it; RINGMOD's EXT
+ * carrier is `ext`.
+ *
  * The filter envelope and the key tracking move the filter's two positions.
  * The machines, EQ, filter, AMP, SRR, chorus and delay are the cores in
  * cores/, each verified on its own; this file joins them and adds what only a
@@ -27,10 +31,18 @@
 #include "cores/mono_fm.h"
 #include "cores/mono_swave.h"
 #include "cores/mono_gnd.h"
+#include "cores/mono_phaser.h"
+#include "cores/mono_flanger.h"
+#include "cores/mono_dynamix.h"
+#include "cores/mono_reverb.h"
+#include "cores/mono_ringmod.h"
+#include "cores/mono_chorus.h"
 
 #define MT_FRAMES 16
 
-enum { MT_SIN, MT_NOIS, MT_SAW, MT_PULS, MT_ENS, MT_STAT, MT_PAR, MT_DYN, MT_MACHINES };
+enum { MT_SIN, MT_NOIS, MT_SAW, MT_PULS, MT_ENS, MT_STAT, MT_PAR, MT_DYN,
+       MT_THRU, MT_REVERB, MT_CHORUS, MT_DYNAMIX, MT_RINGMOD, MT_PHASER, MT_FLANGER, MT_MACHINES };
+#define MT_FX(m) ((m) >= MT_THRU)   /* an FX machine: it processes the track's input */
 
 /* The block words a track uses (Monomachine main CPU -> DSP). */
 enum {
@@ -42,18 +54,29 @@ enum {
 };
 #define MT_LP_KEY (1 << 9)    /* word 37: the low-pass follows the pitch */
 #define MT_HP_KEY (1 << 11)   /* word 37: the high-pass follows the pitch */
+#define MT_INP_AB 0xd0        /* word 37: the input is ADC A and B, through the aux buffer (bits 4, 6, 7) */
 
 /* What each machine's audio routine leaves for the filter: the level word
  * X:$50b (the headroom in front of the clipper) and whether it is mono (X:$50f
  * set: the right EQ and filter are skipped and AMP takes the left for both). */
-static const int32_t mt_headroom[MT_MACHINES] = {0x200000, 0x200000, 0x0a05bc, 0x19999a, 0x280000, 0x200000, 0x200000, 0x200000};
-static const uint8_t mt_stereo[MT_MACHINES] = {0, 1, 0, 0, 0, 0, 0, 0};
+static const int32_t mt_headroom[MT_MACHINES] = {0x200000, 0x200000, 0x0a05bc, 0x19999a, 0x280000, 0x200000, 0x200000, 0x200000,
+   0x200000, 0x200000, 0x200000, 0x200000, 0x200000, 0x200000, 0x200000};
+static const uint8_t mt_stereo[MT_MACHINES] = {0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1};
 
 typedef struct {
    int machine;
    MonoFm fm;
    MonoSwave sw;
    MonoGnd gnd;
+   MonoPhaser phaser;
+   MonoFlanger flanger;
+   MonoDynamix dynamix;
+   MonoReverb reverb;
+   MonoRingmod ringmod;
+   MonoChorus chorus;
+   int init;                    /* an FX machine's init routine is still to run (it reads the SYN words) */
+   int32_t in[2][MT_FRAMES];    /* an FX machine's input for the next block, and RINGMOD's EXT */
+   int32_t ext[2][MT_FRAMES];
    MfPitch glide;
    int32_t fenv, fstage;        /* filter envelope: X:$5db, Y:$5db */
    MonoCore filter;
@@ -67,6 +90,7 @@ static int32_t mt_fdecay[129];  /* the filter envelope's fall per block (Y:$141a
 
 static void mt_tables(void) {
    mc_tables(); md_tables(); sr_tables(); mf_tables(); ms_tables(); mg_tables();
+   mp_tables(); mfl_tables(); mx_tables(); mr_tables(); mq_tables(); mh_tables();
    for (int k = 0; k < 127; ++k) {   /* 1/64 x e^(-c k), to six decimals */
       const int64_t micro = (int64_t)floor(15625.0 * exp(-0.05647235686528125 * k) + 0.5);
       mt_fdecay[k] = (int32_t)((micro * 8388608 + 500000) / 1000000);
@@ -83,10 +107,50 @@ static void mt_reset(MonoTrack *t, int machine, int32_t word) {
    md_reset(&t->delay);
    sr_reset(&t->srr);
    mf_pitch_reset(&t->glide, word);
-   if (machine >= MT_STAT) mf_init(&t->fm, machine - MT_STAT);
+   if (MT_FX(machine)) t->init = 1;
+   else if (machine >= MT_STAT) mf_init(&t->fm, machine - MT_STAT);
    else if (machine >= MT_SAW) ms_init(&t->sw, machine - MT_SAW);
    else mg_init(&t->gnd, machine);
    t->amp.stage = 3;   /* idle, as after a note's release */
+}
+
+/* An FX machine's init routine, with the SYN words of its first block. */
+static void mt_machine_init(MonoTrack *t, const int32_t *syn) {
+   if (!t->init) return;
+   t->init = 0;
+   switch (t->machine) {
+   case MT_REVERB: mr_reset(&t->reverb); break;
+   case MT_CHORUS: mh_reset(&t->chorus, syn[0]); break;
+   case MT_DYNAMIX: mx_reset(&t->dynamix); break;
+   case MT_RINGMOD: mq_reset(&t->ringmod); break;
+   case MT_PHASER: mp_reset(&t->phaser); break;
+   case MT_FLANGER: mfl_reset(&t->flanger, syn[0]); break;
+   default: break;   /* THRU has no state */
+   }
+}
+
+/* An FX machine's audio routine: its SYN knobs as its core takes them. */
+static void mt_fx(MonoTrack *t, const int32_t *syn, int32_t pitch, int32_t x[2][MT_FRAMES]) {
+   const int32_t (*in)[MT_FRAMES] = (const int32_t (*)[MT_FRAMES])t->in;
+   const int32_t six[7] = {syn[0], syn[1], syn[2], syn[3], syn[4], syn[5], syn[7]};   /* the 7th knob unused */
+   mt_machine_init(t, syn);
+   switch (t->machine) {
+   case MT_REVERB: mr_block(&t->reverb, six, in, x); break;
+   case MT_CHORUS: mh_block(&t->chorus, syn, in, x); break;
+   case MT_DYNAMIX: mx_block(&t->dynamix, syn, in, x); break;
+   case MT_PHASER: mp_block(&t->phaser, six, in, x); break;
+   case MT_FLANGER: mfl_block(&t->flanger, six, in, x); break;
+   case MT_RINGMOD: {
+      const int32_t ctl[MQ_CONTROLS] = {syn[0], syn[1], syn[3], syn[7]};
+      mq_block(&t->ringmod, ctl, pitch, in, (const int32_t (*)[MT_FRAMES])t->ext, x);
+      break;
+   }
+   default: {   /* THRU (P:$14764c): the input x INP^2 x 4 */
+      const int32_t gain = mc_sat(mc_mpy(syn[7], syn[7]));
+      for (int c = 0; c < 2; ++c)
+         for (int i = 0; i < MT_FRAMES; ++i) x[c][i] = mc_sat(mc_shl(mc_mpy(in[c][i], gain), 2));
+   }
+   }
 }
 
 /* ---- filter envelope and key tracking (P:$4ff-$56c) -------------------------- */
@@ -128,11 +192,27 @@ static void mt_positions(const int32_t *w, int32_t env, int32_t pitch, int32_t *
    *lp = mc_hi(b);
 }
 
+/* What an FX machine's block leaves in Y:$6d..$6f and Y:$ad..$af, for AMP's low
+ * words; NULL where it leaves them alone. */
+static void mt_fx_low(const MonoTrack *t, const int32_t **l, const int32_t **r) {
+   *l = *r = NULL;
+   switch (t->machine) {
+   case MT_REVERB: *l = t->reverb.y6d; break;
+   case MT_CHORUS: *l = t->chorus.y6d; break;
+   case MT_DYNAMIX: *l = t->dynamix.y6d; break;
+   case MT_RINGMOD: *l = t->ringmod.y6d; *r = t->ringmod.yad; break;
+   case MT_FLANGER: *r = t->flanger.yad; break;
+   default: break;
+   }
+}
+
 /* ---- EQ, filter, DIST: as mono_core_block, at the given positions -------------
  * low[c]: what Y:$6d.. / Y:$ad.. hold when AMP reads them as the low half of
- * the filter's 48-bit output, which moves AMP's product by up to an LSB. */
+ * the filter's 48-bit output, which moves AMP's product by up to an LSB. The
+ * first three are the last block's delay pass and zeros, or what the machine
+ * left there (l6d, lad). */
 static void mt_filter(MonoTrack *t, const int32_t *w, int32_t hp_target, int32_t lp_target,
-                      int32_t io[2][MT_FRAMES], int32_t low[2][MT_FRAMES]) {
+                      int32_t io[2][MT_FRAMES], int32_t low[2][MT_FRAMES], const int32_t *l6d, const int32_t *lad) {
    MonoCore *m = &t->filter;
    McBlock k;
    mc_eq(w[W_EQF], w[W_EQG], k.eq);
@@ -164,14 +244,14 @@ static void mt_filter(MonoTrack *t, const int32_t *w, int32_t hp_target, int32_t
    m->dc_c = mc_sat(a);
    m->dc_t = tp;
 
-   const int32_t *y = t->delay.y62;     /* Y:$62.. from the last block's delay: Y:$6d..$6f */
+   const int32_t *y = l6d ? l6d : t->delay.y62 + 11;     /* Y:$6d..$6f: the machine's, or the last block's delay pass (Y:$62..) */
    int32_t u[12];
    mc_channel(&m->ch[0], &k, io[0], u);
-   low[0][0] = y[11]; low[0][1] = y[12]; low[0][2] = y[13]; low[0][3] = comp;
+   low[0][0] = y[0]; low[0][1] = y[1]; low[0][2] = y[2]; low[0][3] = comp;
    memcpy(&low[0][4], u, sizeof u);
    if (mt_stereo[t->machine]) {
       mc_channel(&m->ch[1], &k, io[1], u);
-      low[1][0] = low[1][1] = low[1][2] = 0;
+      for (int k = 0; k < 3; ++k) low[1][k] = lad ? lad[k] : 0;
       low[1][3] = k.clip_gain;
       memcpy(&low[1][4], u, sizeof u);
    } else {
@@ -187,11 +267,15 @@ static void mt_filter(MonoTrack *t, const int32_t *w, int32_t hp_target, int32_t
 static void mt_block(MonoTrack *t, const int32_t *w, int32_t out[2][MT_FRAMES]) {
    const int trig = w[W_NOTE] & 0x80, m = t->machine;
    const int32_t *syn = w + W_SYN;
-   const int32_t pitch = mf_pitch(&t->glide, w[W_PITCH], syn[7], w[W_PORT], w[W_TICK], w[W_PMOD], w[W_MTUNE]);
+   /* X:$1, the pitch's +-2 semitones: the 8th SYN knob (TUNE), or 64 when the
+    * track reads the aux buffer or a bus (P:$11b; an FX machine's 8th knob is INP) */
+   const int32_t tune = w[W_ROUTE] & 0x18 ? 0x400000 : syn[7];
+   const int32_t pitch = mf_pitch(&t->glide, w[W_PITCH], tune, w[W_PORT], w[W_TICK], w[W_PMOD], w[W_MTUNE]);
 
    /* the machine */
    int32_t x[2][MT_FRAMES];
-   if (m >= MT_STAT) mf_block(&t->fm, syn, pitch, trig, x[0]);
+   if (MT_FX(m)) mt_fx(t, syn, pitch, x);
+   else if (m >= MT_STAT) mf_block(&t->fm, syn, pitch, trig, x[0]);
    else if (m >= MT_SAW) ms_block(&t->sw, syn, pitch, trig, x[0]);
    else mg_block(&t->gnd, syn, pitch, x);
    if (!mt_stereo[m] && m >= MT_SAW) memcpy(x[1], x[0], sizeof x[0]);
@@ -199,8 +283,10 @@ static void mt_block(MonoTrack *t, const int32_t *w, int32_t out[2][MT_FRAMES]) 
    /* filter envelope, key tracking, EQ, filter, DIST */
    mt_filter_env(t, w);
    int32_t hp, lp, low[2][MT_FRAMES];
+   const int32_t *l6d = NULL, *lad = NULL;
+   if (MT_FX(m)) mt_fx_low(t, &l6d, &lad);
    mt_positions(w, t->fenv, pitch, &hp, &lp);
-   mt_filter(t, w, hp, lp, x, low);
+   mt_filter(t, w, hp, lp, x, low, l6d, lad);
 
    /* AMP */
    int32_t g[2][MT_FRAMES], y[2][MT_FRAMES];

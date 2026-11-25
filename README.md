@@ -1,18 +1,19 @@
 # Mono Track
 
-A whole track of the Elektron Monomachine around each synth machine, as eight
-CLAP instruments for Bitwig (macOS, universal binary). Each one is the machine
-with everything the unit puts after it: EQ, filter with key tracking and its
-envelope, DIST, the AMP envelope, SRR, the tempo-synced delay, LEVEL, and the
-three LFOs.
+A whole track of the Elektron Monomachine around fifteen of its machines, as
+CLAP plug-ins for Bitwig (macOS, universal binary): eight instruments around
+synth machines, and seven audio effects around all of its FX machines. Each
+one is the machine with everything the unit puts after it: EQ, filter with key
+tracking and its envelope, DIST, the AMP envelope, SRR, the tempo-synced delay,
+LEVEL, and the three LFOs.
 
 The DSP is a fixed-point C port of Monomachine OS 1.32B, written from its
 DSP56300 kernel and machines. The LFOs and knob smoothing are a port of its
 main-CPU code. Both were checked sample for sample against that code running
 in emulators. No firmware code is in this repository. Its tables are generated
 from formulas at start-up, except the oscillators' band-limited impulse (515
-words), which no formula reproduces and which is copied from the firmware (the
-same table Mono Ringmod and Mono SWAVE ship).
+words, used by SWAVE and RINGMOD), which no formula reproduces and which is
+copied from the firmware (the same table Mono Ringmod and Mono SWAVE ship).
 
 The bundle `Mono Track.clap` holds:
 
@@ -26,9 +27,50 @@ The bundle `Mono Track.clap` holds:
 | Mono Track FM+ STAT | FM+ STAT |
 | Mono Track FM+ PAR | FM+ PAR |
 | Mono Track FM+ DYN | FM+ DYN |
+| Mono Track FX THRU | THRU: the input, through the track |
+| Mono Track FX REVERB | REVERB |
+| Mono Track FX CHORUS | CHORUS |
+| Mono Track FX DYNAMIX | DYNAMIX |
+| Mono Track FX RINGMOD | RINGMOD, with a sidechain for EXT |
+| Mono Track FX PHASER | PHASER |
+| Mono Track FX FLANGER | FLANGER |
 
 Each is monophonic, as a Monomachine track is, until POLY is on. Each has an
 editor window with a pattern of up to 64 steps, with trigs and parameter locks.
+
+## The FX machines
+
+An FX plug-in is an FX track: the host's audio is the track's input, as the
+unit's INP A+B routing reads its inputs, and everything after the machine is
+the same track as on the instruments.
+
+- **It passes audio with no note.** The AMP envelope starts open, from the
+  attack the firmware begins at power-on, and its DEC and REL default to 127
+  (endless), so it stays open. The main OS gives every machine DEC and REL 64
+  when one is assigned; 127 is the plug-in's default for an effect, as
+  Monomodule's FX tracks have it.
+- **Notes still play the track.** A note trigs the AMP envelope, the filter
+  envelope and the LFOs, as a trig on an FX track does on the unit. Turn DEC or
+  REL down for a gated effect. RINGMOD's oscillator follows the note, with
+  PORT's glide.
+- **LP KEY and HP KEY are off by default**, so the filter does not follow notes
+  the effect never plays. On, the high-pass at BASE 0 would sit about five
+  octaves above its lowest point for C4.
+- **RINGMOD's EXT** takes its carrier from the plug-in's second input, Ext In
+  (a sidechain), one sample behind the main input, as Mono Ringmod does. On the
+  unit EXT reads the inputs themselves.
+- **Latency** is one block, 16 samples at 44.1 kHz: a block is computed once
+  its 16 input samples are in. It is reported to the host.
+- **Start.** The machines that mute or ramp after they are assigned (REVERB 256
+  blocks, CHORUS and FLANGER 128, DYNAMIX's gain 1024, RINGMOD 4) run that
+  start on silence, so the effect is there from the first sample.
+- **POLY** makes six FX tracks on the same input, each with its own envelopes
+  and, on RINGMOD, its own pitch.
+- **CHORUS** is a new port of the FX-CHORUS machine (P:$14767b): three taps per
+  side, each swept by one phase of a sine LFO (0, 120 and 240 degrees), a
+  low-pass (LP) in the feedback only, and WID turning the right side's LFO. The
+  other machines are the cores of Mono Reverb, Mono Dynamix, Mono Ringmod, Mono
+  Phaser and Mono Flanger.
 
 ## The editor
 
@@ -37,7 +79,7 @@ column holds the track's settings, including VEL and KEY SETUP, and the bottom r
 pattern. Pressing an
 LFO tab and sliding across the others switches to each one under the pointer.
 The top-left corner shows, faintly, the name, the version and the commit the
-build came from, such as `Mono Track 0.7.0 (ff94ab5)`. A `+` after the commit marks a build with
+build came from, such as `Mono Track 0.8.0 (ff94ab5)`. A `+` after the commit marks a build with
 uncommitted changes.
 
 Each LFO tab shows its LFO: the wave it plays over one cycle, on a zero line,
@@ -170,13 +212,21 @@ SYN by machine:
 | FM+ STAT | 1FRQ 1FIN 1ENV 1FB 2FRQ 2VOL TONE TUNE |
 | FM+ PAR | 1FRQ 1ENV 2FRQ 2ENV 3FRQ 3ENV TONE TUNE |
 | FM+ DYN | 1FRQ 1FEN 1VOL 1VEN 2FRQ 2ENV 2FB TUNE |
+| THRU | INP |
+| REVERB | DEC DAMP GATE MIX HP LP INP |
+| CHORUS | DEL DEP SPD MIX FB WID LP INP |
+| DYNAMIX | ATK REL THRS MIX RAT GAIN RMS INP |
+| RINGMOD | WAVE EXT MIX INP |
+| PHASER | CNTR DEP SPD MIX FB WID INP |
+| FLANGER | DEL DEP SPD MIX FB WID INP |
 
 Values read as on the unit's display, taken from the knob descriptors in its
 main OS:
 
 - Knobs the unit shows as −64 to +63 read as the value − 64: TUNE, PW on PULS
-  and ENS, 1FIN on FM+ STAT, 1FEN and 1VEN on FM+ DYN, DIST, PAN, BOFS, WOFS,
-  EQG and DSND. Their centre reads 0.0, with no sign, as KIT ASSIGN's ADD reads 0.
+  and ENS, 1FIN on FM+ STAT, 1FEN and 1VEN on FM+ DYN, INP on CHORUS, DYNAMIX,
+  RINGMOD, PHASER and FLANGER (not on THRU and REVERB), CNTR on PHASER, FB on
+  PHASER and FLANGER, DIST, PAN, BOFS, WOFS, EQG and DSND. Their centre reads 0.0, with no sign, as KIT ASSIGN's ADD reads 0.
   All others read 0–127.
 - NOIS's STON and PULS's PWRS read OFF or ON (64 and up).
 - FM+ STAT's and PAR's 1FRQ, 2FRQ and 3FRQ read the listed ratio, 1/64 to 4.
@@ -223,7 +273,7 @@ The TRACK page:
 
 - **LEVEL** is the track's level.
 - **LP KEY** and **HP KEY** are the kit's key-tracking switches, LPF and HPF in
-  KEY SETUP, both on by default.
+  KEY SETUP, both on by default on the instruments and off on the effects.
 
 KIT ASSIGN's twelve rows (VEL 1 PAGE … KEY 2 ADD) are host parameters too, in
 the module ASSIGN, but on no remote-control page.
@@ -264,17 +314,19 @@ the module ASSIGN, but on no remote-control page.
 - **Timing.** The main CPU's timing is kept: notes and modulation are taken
   every 48 samples, and knobs glide to their new value in steps every 384
   samples, as they do on the unit.
-- **Sample rate.** The track runs at 44.1 kHz. At other rates its output goes
-  through a windowed-sinc resampler, and the latency is reported to the host.
-  At 44.1 kHz the latency is 0.
-- **Start.** The plug-in starts with the AMP envelope idle and the delay at its
-  time. NOIS's red noise and ENS's chorus start already run in, as they are
-  long before a first note on the unit.
+- **Sample rate.** The track runs at 44.1 kHz. At other rates its output (and
+  an effect's input) goes through a windowed-sinc resampler, and the latency is
+  reported to the host. At 44.1 kHz the latency is 0 on the instruments and 16
+  samples on the effects.
+- **Start.** An instrument starts with the AMP envelope idle, an effect with it
+  open, and both with the delay at its time. NOIS's red noise and ENS's chorus
+  start already run in, as they are long before a first note on the unit.
 
 ## Differences from the hardware
 
 - **One track.** The buses between tracks are not here: NEIBOR and bus inputs,
-  OUT BUS, AB=MIX and 6×MONO. SID and WAVE, which read a neighbour's pitch, are
+  OUT BUS, AB=MIX and 6×MONO. An FX track's input is INP A+B, the host's stereo
+  input; INP A and INP B alone are not offered. SID and WAVE, which read a neighbour's pitch, are
   not among these machines. The output is the track's own, after its 24-bit
   limiter.
 - **The sequencer plays no notes.** Trigs and locks act on notes from MIDI. On
@@ -296,15 +348,20 @@ the module ASSIGN, but on no remote-control page.
 - **Neighbouring tracks' low bits.** AMP reads three low-order words that the
   previous track's delay left in shared memory. Here they come from this
   track's own delay, as in a one-track emulation. The effect is at most one
-  LSB of 24.
+  LSB of 24. REVERB, CHORUS, DYNAMIX and RINGMOD overwrite those words
+  themselves, and RINGMOD and FLANGER three of the right side's; the plug-in
+  has their values.
 - **The analog stage** after the DAC is not modelled.
 
 ## Accuracy
 
 | What | Checked against | Amount | Result |
 |---|---|---|---|
-| Whole DSP track, all 8 machines, from random block words | the firmware in a DSP56300 emulator | 102.4 M samples | 0 differ¹ |
-| The built plug-in, with random knobs, LFOs, notes, bends, tempo | the same | 30.7 M samples | 0 differ¹ |
+| Whole DSP track, the 8 synth machines, from random block words | the firmware in a DSP56300 emulator | 115.2 M samples | 0 differ¹ |
+| Whole DSP track, the 7 FX machines, from random block words and random input through the ADC | the same | 89.6 M samples | 0 differ¹ |
+| The CHORUS machine alone: every output sample and state word, both delay rings every 16 blocks | the same | 400,000 blocks | 0 differ |
+| The built plug-in, with random knobs, LFOs, notes, bends, tempo | the same | 35.8 M samples | 0 differ¹ |
+| The built plug-in as an effect, with random input (RINGMOD a sidechain too) as well | the same | 26.9 M samples | 0 differ¹ |
 | LFOs, knob slew, block words | the main OS's own code in a 68020 emulator | 200,000 frames | 0 differ |
 | POLY's voice allocator | the same | 200,000 note events | 0 differ |
 | Which locks a step sends, and returns to the kit | the same | 100,000 steps | 0 differ |
@@ -332,8 +389,8 @@ the module ASSIGN, but on no remote-control page.
 - The plug-in's own page fill (the editor's LEN and page buttons) is checked by
   the editor test, not against the firmware. The firmware checks cover the rule
   it follows and what a fill copies.
-- The 64-step pattern, the VEL and KEY SETUP windows and typed values have not
-  been tried by hand in Bitwig yet. Typing needs the host to pass keys to the
+- The FX plug-ins, the 64-step pattern, the VEL and KEY SETUP windows and typed
+  values have not been tried by hand in Bitwig yet. Typing needs the host to pass keys to the
   plug-in's window; the editor test types through AppKit's own field editor.
 - Velocity and key were not compared with the unit's own keyboard, whose
   velocity curve (VELOCITY CURVE in the global settings) comes before them.
@@ -342,6 +399,11 @@ the module ASSIGN, but on no remote-control page.
   modulation by up to about 1 ms.
 - The KIT ASSIGN path for pitch bend was read from the main OS and checked in
   the earlier plug-ins, not re-run against it here.
+- RINGMOD's EXT words: the firmware reads them from the input buffer one
+  sample behind the machine's input. The emulator does not fill that buffer as
+  the unit does, so the harnesses wrote the plug-in's EXT words there; the EXT
+  arithmetic is checked, the offset is not.
+- POLY on an effect was not run against the firmware, as for the instruments.
 
 ## Build
 
@@ -364,9 +426,13 @@ xcrun clang -std=c11 -O1 -fobjc-arc -w -I vendor/clap/include tests/gui_test.m -
 `test_core` needs no firmware. `clap_test` loads the bundle and checks its
 pages, parameters, state (including states saved by 0.1.0, 0.2.0 and 0.4, which load as 16 steps at 1X, and
 0.5, which load KIT ASSIGN as a cleared kit), each section's effect on the sound, velocity and key through KIT ASSIGN, POLY, the MIDI TRIG switches, trigs and locks.
-It also checks that every value's text, typed back, reads the same: on all eight
-machines, every parameter at 2,033 values, DEST under every PAGE. `gui_test` opens the
-editor off-screen and drives it with mouse and key events, typed values included. All three also pass
+It also checks that every value's text, typed back, reads the same: on all fifteen
+machines, every parameter at 2,033 values, DEST under every PAGE; each machine's state
+round trip; and the effects: their ports, defaults and latency, that each passes its input
+with no note at 44.1 and 48 kHz, INP at 0, a note reopening a closed AMP, RINGMOD's
+sidechain and POLY. `gui_test` opens the
+editor off-screen and drives it with mouse and key events, typed values included, and
+opens PHASER's editor. All three also pass
 under AddressSanitizer and UBSan and as an Intel build under Rosetta, and the
 bundle passes `clap-trap` at 44.1, 48 and 96 kHz.
 

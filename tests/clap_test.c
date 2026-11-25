@@ -1,7 +1,11 @@
 /* Loads the built bundle like a host and checks what the core test cannot:
  * the wrapper around mono_track.h. usage: clap_test "build/Mono Track.clap"
- *  - the bundle offers the eight machines, each with 61 parameters and the
+ *  - the bundle offers the fifteen machines, each with 78 parameters and the
  *    eight remote-control pages (SYN AMP FILT EFX LFO1 LFO2 LFO3 TRACK)
+ *  - every machine's state round trip, which no other machine loads
+ *  - the FX machines: their ports, defaults and latency; each passes its input
+ *    at 44.1 and 48 kHz with no note; INP at 0 silences it; a note reopens the
+ *    AMP; RINGMOD's EXT takes the sidechain; no input buffer is silence; POLY
  *  - a note sounds and its release fades, at 44.1 and 48 kHz, and the latency
  *    is reported
  *  - each section is in the signal path: EQ, filter, DIST, SRR, delay, LEVEL
@@ -32,7 +36,9 @@
 #define STATE_SIZE (PAT + 10 + 64 * 56)
 #define N 88200
 enum { SYN = 0, AMP = 8, FILT = 16, EFX = 24, LFO = 32, LEVEL = 56, LPKEY, HPKEY, BEND, MTUNE, POLY, TRIG_SYN, TRIG_FILT, TRIG_LFO, LOCK_END, ASSIGN };   /* ASSIGN: VEL 1, VEL 2, KEY 1, KEY 2, each PAGE DEST ADD */
-static const char *const ids[8] = {"sin", "nois", "saw", "puls", "ens", "fmstat", "fmpar", "fmdyn"};
+static const char *const ids[15] = {"sin", "nois", "saw", "puls", "ens", "fmstat", "fmpar", "fmdyn",
+   "thru", "reverb", "chorus", "dynamix", "ringmod", "phaser", "flanger"};
+#define FX0 8   /* the first FX machine */
 
 typedef union { clap_event_header_t h; clap_event_param_value_t v; clap_event_note_t n; } Event;
 typedef struct { clap_input_events_t api; Event v[NPARAM + 4]; uint32_t n; } Events;
@@ -63,8 +69,10 @@ static void set_params(const clap_plugin_t *p, const Set *set, int n) {
       ev.v[ev.n++].v = (clap_event_param_value_t){{sizeof ev.v[0].v, 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0}, (clap_id)set[i].id, NULL, -1, -1, -1, -1, set[i].v};
    params->flush(p, &ev.api, NULL);
 }
-/* A note from frame 100 for `hold` frames, at this velocity; the output, frame by frame. */
+/* A note from frame 100 for `hold` frames (none for key -1), at this velocity; the output, frame by frame.
+ * in_l/in_r and ext_l/ext_r, when set, are the input and the sidechain. */
 static double note_vel = 1.0;
+static float *in_l, *in_r, *ext_l, *ext_r;
 static void render(int m, const Set *set, int nset, int key, int hold, double rate, float *l, float *r, int frames) {
    const clap_plugin_t *p = create(m);
    set_params(p, set, nset);
@@ -78,15 +86,19 @@ static void render(int m, const Set *set, int nset, int key, int hold, double ra
    for (int at = 0; at < frames; at += 512) {
       const int n = frames - at < 512 ? frames - at : 512;
       ev.n = 0;
-      if (at <= 100 && 100 < at + n)
+      if (key >= 0 && at <= 100 && 100 < at + n)
          ev.v[ev.n++].n = (clap_event_note_t){{sizeof ev.v[0].n, (uint32_t)(100 - at), CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_NOTE_ON, 0}, -1, 0, 0, (int16_t)key, note_vel};
-      if (at <= 100 + hold && 100 + hold < at + n)
+      if (key >= 0 && at <= 100 + hold && 100 + hold < at + n)
          ev.v[ev.n++].n = (clap_event_note_t){{sizeof ev.v[0].n, (uint32_t)(100 + hold - at), CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_NOTE_OFF, 0}, -1, 0, 0, (int16_t)key, 0.0};
       float *data[2] = {l + at, r + at};
       clap_audio_buffer_t out;
       memset(&out, 0, sizeof out);
       out.data32 = data;
       out.channel_count = 2;
+      float *idata[2][2] = {{in_l ? in_l + at : NULL, in_r ? in_r + at : NULL}, {ext_l ? ext_l + at : NULL, ext_r ? ext_r + at : NULL}};
+      clap_audio_buffer_t ins[2];
+      memset(ins, 0, sizeof ins);
+      for (int k = 0; k < 2; ++k) { ins[k].data32 = idata[k]; ins[k].channel_count = 2; }
       clap_process_t pr;
       memset(&pr, 0, sizeof pr);
       pr.frames_count = (uint32_t)n;
@@ -94,6 +106,8 @@ static void render(int m, const Set *set, int nset, int key, int hold, double ra
       pr.transport = &tr;
       pr.audio_outputs = &out;
       pr.audio_outputs_count = 1;
+      pr.audio_inputs = ins;
+      pr.audio_inputs_count = in_l ? (ext_l ? 2 : 1) : 0;
       pr.in_events = &ev.api;
       CHECK(p->process(p, &pr) == CLAP_PROCESS_CONTINUE, "process");
    }
@@ -156,6 +170,11 @@ static void schedule(int m, const Set *set, int nset, const Sched *notes, int nn
       memset(&out, 0, sizeof out);
       out.data32 = data;
       out.channel_count = 2;
+      float *idata[2] = {in_l ? in_l + at : NULL, in_r ? in_r + at : NULL};
+      clap_audio_buffer_t inb;
+      memset(&inb, 0, sizeof inb);
+      inb.data32 = idata;
+      inb.channel_count = 2;
       clap_process_t pr;
       memset(&pr, 0, sizeof pr);
       pr.frames_count = (uint32_t)n;
@@ -163,6 +182,8 @@ static void schedule(int m, const Set *set, int nset, const Sched *notes, int nn
       pr.transport = &tr;
       pr.audio_outputs = &out;
       pr.audio_outputs_count = 1;
+      pr.audio_inputs = &inb;
+      pr.audio_inputs_count = in_l ? 1 : 0;
       pr.in_events = &ev.api;
       CHECK(p->process(p, &pr) == CLAP_PROCESS_CONTINUE, "process");
    }
@@ -186,10 +207,10 @@ int main(int argc, char **argv) {
    const clap_plugin_entry_t *entry = dlsym(lib, "clap_entry");
    CHECK(entry && entry->init(path), "entry");
    factory = entry->get_factory(CLAP_PLUGIN_FACTORY_ID);
-   CHECK(factory && factory->get_plugin_count(factory) == 8, "eight plug-ins");
+   CHECK(factory && factory->get_plugin_count(factory) == 15, "fifteen plug-ins");
 
    static const char *const pages[8] = {"SYN", "AMP", "FILT", "EFX", "LFO1", "LFO2", "LFO3", "TRACK"};
-   for (int m = 0; m < 8; ++m) {
+   for (int m = 0; m < 15; ++m) {
       const clap_plugin_t *p = create(m);
       const clap_plugin_params_t *pa = p->get_extension(p, CLAP_EXT_PARAMS);
       const clap_plugin_remote_controls_t *rc = p->get_extension(p, CLAP_EXT_REMOTE_CONTROLS);
@@ -228,6 +249,26 @@ int main(int argc, char **argv) {
             }
          }
          if (dest) { clap_param_info_t pi; pa->get_info(p, i - 1, &pi); set_params(p, &(Set){(int)i - 1, pi.default_value}, 1); }
+      }
+      {   /* the state round trip, into a fresh instance; another machine refuses it */
+         set_params(p, (Set[]){{SYN + 3, 99}, {AMP + 3, 17}, {LFO + 5, 3}, {LPKEY, 1}}, 4);
+         Buffer b = {{0}, 0, 0};
+         clap_ostream_t os = {&b, buf_write};
+         clap_istream_t is = {&b, buf_read};
+         const clap_plugin_state_t *st = p->get_extension(p, CLAP_EXT_STATE);
+         CHECK(st->save(p, &os) && b.size == STATE_SIZE, "machine %d save", m);
+         const clap_plugin_t *q = create(m);
+         const clap_plugin_params_t *pq = q->get_extension(q, CLAP_EXT_PARAMS);
+         CHECK(((const clap_plugin_state_t *)q->get_extension(q, CLAP_EXT_STATE))->load(q, &is), "machine %d load", m);
+         for (uint32_t i = 0; i < NPARAM; ++i) {
+            double x, y;
+            CHECK(pa->get_value(p, i, &x) && pq->get_value(q, i, &y) && x == y, "machine %d param %u after load", m, i);
+         }
+         q->destroy(q);
+         const clap_plugin_t *o = create((m + 1) % 15);
+         b.pos = 0;
+         CHECK(!((const clap_plugin_state_t *)o->get_extension(o, CLAP_EXT_STATE))->load(o, &is), "machine %d's state loads into %d", m, (m + 1) % 15);
+         o->destroy(o);
       }
       p->destroy(p);
    }
@@ -421,8 +462,8 @@ int main(int argc, char **argv) {
       p->destroy(p);
    }
 
-   /* every machine sounds and fades, at 44.1 and 48 kHz */
-   for (int m = 0; m < 8; ++m)
+   /* every synth machine sounds and fades, at 44.1 and 48 kHz */
+   for (int m = 0; m < FX0; ++m)
       for (int rt = 0; rt < 2; ++rt) {
          render(m, NULL, 0, 60, 22050, rt ? 48000 : 44100, l, r, N);
          CHECK(rms(l, 1000, 20000) > 1e-4, "machine %d rate %d silent", m, rt);
@@ -700,6 +741,75 @@ int main(int argc, char **argv) {
          CHECK(rms(l, 800, 2 * S - 200) > 1e-3, "chord before the lock");
          CHECK(rms(l, 2 * S + 1000, 4 * S) < 1e-5, "a lock must reach all voices: %g", rms(l, 2 * S + 1000, 4 * S));
       }
+   }
+
+   /* the FX machines */
+   {
+      static float sl[N], sr[N], xl[N], xr[N];
+      for (int i = 0; i < N; ++i) {   /* a chord of two tones as the input, a 1 kHz tone as the sidechain */
+         sl[i] = (float)(0.3 * sin(2 * M_PI * 220 * i / 44100.0) + 0.2 * sin(2 * M_PI * 331 * i / 44100.0));
+         sr[i] = (float)(0.3 * sin(2 * M_PI * 277 * i / 44100.0));
+         xl[i] = xr[i] = (float)(0.5 * sin(2 * M_PI * 1000 * i / 44100.0));
+      }
+      for (int m = 0; m < 15; ++m) {
+         const clap_plugin_t *p = create(m);
+         const clap_plugin_audio_ports_t *ap = p->get_extension(p, CLAP_EXT_AUDIO_PORTS);
+         const clap_plugin_params_t *pa = p->get_extension(p, CLAP_EXT_PARAMS);
+         const clap_plugin_latency_t *lat = p->get_extension(p, CLAP_EXT_LATENCY);
+         const uint32_t ins = m < FX0 ? 0 : m == FX0 + 4 ? 2 : 1;
+         CHECK(ap->count(p, true) == ins && ap->count(p, false) == 1, "machine %d ports", m);
+         for (uint32_t i = 0; i < ins; ++i) {
+            clap_audio_port_info_t info;
+            CHECK(ap->get(p, i, true, &info) && info.id == i && info.channel_count == 2 && !!(info.flags & CLAP_AUDIO_PORT_IS_MAIN) == !i, "machine %d input %u", m, i);
+         }
+         const clap_plugin_descriptor_t *d = factory->get_plugin_descriptor(factory, (uint32_t)m);
+         CHECK(!strcmp(d->features[0], m < FX0 ? CLAP_PLUGIN_FEATURE_INSTRUMENT : CLAP_PLUGIN_FEATURE_AUDIO_EFFECT), "machine %d features", m);
+         clap_param_info_t info;
+         CHECK(pa->get_info(p, AMP + 2, &info) && info.default_value == (m < FX0 ? 64 : 127), "machine %d DEC default", m);
+         CHECK(pa->get_info(p, LPKEY, &info) && info.default_value == (m < FX0), "machine %d LP KEY default", m);
+         p->activate(p, 44100, 1, 512); CHECK(lat->get(p) == (m < FX0 ? 0u : 16u), "machine %d latency %u", m, lat->get(p)); p->deactivate(p);
+         p->activate(p, 48000, 1, 512); CHECK(lat->get(p) > (m < FX0 ? 0u : 16u) && lat->get(p) < 250, "machine %d latency at 48: %u", m, lat->get(p)); p->deactivate(p);
+         p->destroy(p);
+      }
+      in_l = sl; in_r = sr;
+      for (int m = FX0; m < 15; ++m)
+         for (int rt = 0; rt < 2; ++rt) {   /* the input passes with no note, from the start, and stays */
+            render(m, NULL, 0, -1, 0, rt ? 48000 : 44100, l, r, N);
+            CHECK(rms(l, 30000, N) > 0.01 && rms(r, 30000, N) > 0.01, "machine %d rate %d: %g %g", m, rt, rms(l, 30000, N), rms(r, 30000, N));
+            CHECK(rms(l, 12000, 20000) > 0.5 * rms(l, N - 8000, N), "machine %d rate %d: late", m, rt);
+            const Set mute[1] = {{SYN + 7, 0}};
+            render(m, mute, 1, -1, 0, rt ? 48000 : 44100, l, r, N);
+            CHECK(rms(l, 30000, N) < 1e-4, "machine %d rate %d: INP 0 lets through %g", m, rt, rms(l, 30000, N));
+         }
+      {   /* THRU: one block late at 44.1 kHz; with DEC and REL down the AMP closes, and a note reopens it */
+         render(FX0, NULL, 0, -1, 0, 44100, l, r, N);
+         CHECK(rms(l, 0, 16) == 0 && rms(l, 16, 32) > 0, "THRU: the first block is silence");
+         const Set shut[2] = {{AMP + 2, 20}, {AMP + 3, 20}};
+         const Sched note[2] = {{44100, 60, 1}, {46100, 60, 0}};
+         schedule(FX0, shut, 2, note, 2, NULL, l, r, N);
+         CHECK(rms(l, 40000, 44100) < 1e-4, "THRU: the envelope does not close: %g", rms(l, 40000, 44100));
+         CHECK(rms(l, 44300, 46000) > 0.01, "THRU: the note does not open it: %g", rms(l, 44300, 46000));
+      }
+      {   /* RINGMOD: with EXT and MIX up, the sidechain is the carrier */
+         const Set ext[2] = {{SYN + 1, 127}, {SYN + 3, 127}};
+         render(FX0 + 4, ext, 2, -1, 0, 44100, l, r, N);
+         CHECK(rms(l, 30000, N) < 1e-3, "RINGMOD: no sidechain, no carrier: %g", rms(l, 30000, N));
+         ext_l = xl; ext_r = xr;
+         render(FX0 + 4, ext, 2, -1, 0, 44100, l, r, N);
+         CHECK(rms(l, 30000, N) > 0.01, "RINGMOD: the sidechain does not carry: %g", rms(l, 30000, N));
+         render(FX0 + 4, ext, 2, -1, 0, 48000, l, r, N);
+         CHECK(rms(l, 30000, N) > 0.01, "RINGMOD: the sidechain at 48 kHz: %g", rms(l, 30000, N));
+         ext_l = ext_r = NULL;
+      }
+      {   /* POLY on an effect: each voice is a whole FX track, all on the same input */
+         const Set poly[1] = {{POLY, 1}};
+         const Sched chord[2] = {{100, 48, 1}, {100, 60, 1}};
+         schedule(FX0 + 4, poly, 1, chord, 2, NULL, l, r, N);
+         CHECK(rms(l, 30000, N) > 0.01, "POLY RINGMOD: %g", rms(l, 30000, N));
+      }
+      in_l = in_r = NULL;
+      render(FX0 + 1, NULL, 0, 60, 1000, 44100, l, r, N);   /* no input buffer: silence */
+      CHECK(rms(l, 0, N) == 0, "REVERB without input: %g", rms(l, 0, N));
    }
 
    /* speed */
