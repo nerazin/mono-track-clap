@@ -30,14 +30,14 @@
 #endif
 
 /* Plug-ins share one host process, and Objective-C classes one namespace: the version keeps builds apart. */
-#define MTEditorView MonoTrackEditorView_0_8_4
+#define MTEditorView MonoTrackEditorView_0_8_5
 
 enum { C_TITLE, C_KNOB, C_TAB, C_SLIDER, C_SWITCH, C_KEYS, C_PAD, C_CLEAR, C_COPY, C_PASTE, C_LEN, C_SPEED, C_PAGE, C_SETUP, C_CLOSE, C_SIZE, C_MAX = 160 };
 /* Controls of the setup windows have these sections: KIT ASSIGN's KEY VEL and KEY TRK tabs. */
 enum { S_VEL = 5, S_KEY = 6 };
 typedef struct { int kind, id, section; NSRect r; const char *label; } Ctl;
 
-static const char *const kSection[5] = {"SYN", "AMP", "FILT", "EFX", "LFO"};
+static const char *const kSection[4] = {NULL, "AMP", "FILT", "EFX"};   /* the first section is titled with the machine */
 static const char *const kSpeed[4] = {"1X", "2X", "3/4X", "3/2X"};
 static const char *const kPadKey[16] = {"1", "2", "3", "4", "5", "6", "7", "8", "Q", "W", "E", "R", "T", "Y", "U", "I"};
 /* Physical keys, so Shift and non-Latin layouts do not change them. */
@@ -140,6 +140,69 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
    CGContextFillEllipseInRect(g, CGRectMake(o.x + r * cos(a) - size, o.y + r * sin(a) - size, 2 * size, 2 * size));
 }
 
+/* A machine's icon, 26 x 16 at o, for the machines in mono_track.h's order: GND's and SWAVE's wave,
+ * FM+'s modulators into the carrier, what an effect does to the sound. */
+static void drawIcon(int machine, NSPoint o, NSColor *color) {
+   NSBezierPath *b = [NSBezierPath bezierPath];
+   void (^m)(double, double) = ^(double x, double y) { [b moveToPoint:NSMakePoint(o.x + x, o.y + y)]; };
+   void (^l)(double, double) = ^(double x, double y) { [b lineToPoint:NSMakePoint(o.x + x, o.y + y)]; };
+   void (^ring)(double, double, double) = ^(double x, double y, double r) {
+      [b appendBezierPathWithOvalInRect:NSMakeRect(o.x + x - r, o.y + y - r, 2 * r, 2 * r)];
+   };
+   void (^curve)(double (^)(double)) = ^(double (^y)(double)) {
+      for (int i = 0; i <= 78; ++i) if (i) l(i / 3.0, y(i / 78.0)); else m(0, y(0));
+   };
+   double width = 1.5;
+   [color set];
+   switch (machine) {
+   case 0: curve(^(double x) { return 8 - 6 * sin(2 * M_PI * x); }); break;   /* GND SIN */
+   case 1: {                                                                  /* GND NOIS */
+      static const double n[14] = {8, 4, 11, 2, 9, 14, 5, 12, 1, 10, 6, 15, 3, 8};
+      for (int i = 0; i < 14; ++i) if (i) l(2 * i, n[i]); else m(0, n[0]);
+      break;
+   }
+   case 2: m(0, 14); l(13, 2); l(13, 14); l(26, 2); l(26, 14); break;         /* SWAVE SAW */
+   case 3:                                                                    /* SWAVE PULS */
+      m(0, 14); l(0, 2); l(4, 2); l(4, 14); l(13, 14); l(13, 2); l(17, 2); l(17, 14); l(26, 14);
+      break;
+   case 4:                                                                    /* SWAVE ENS: a chord of waves */
+      for (int k = 0; k < 3; ++k) curve(^(double x) { return 3 + 5 * k - 1.8 * sin(2 * M_PI * (2 + k) * x); });
+      break;
+   case 5: case 6: case 7: {   /* FM+ STAT, PAR, DYN: one operator of STAT (1) and DYN (2) feeds itself back; DYN's 1 has envelopes */
+      const int ops = machine == 6 ? 3 : 2;
+      for (int k = 0; k < ops; ++k) {
+         const double y = ops == 3 ? 2 + 6 * k : 4 + 8 * k;
+         ring(7, y, 2);
+         if ((machine == 5 && k == 0) || (machine == 7 && k == 1)) ring(3, y, 2);
+         m(9, y);
+         if (machine == 7 && k == 0) [b curveToPoint:NSMakePoint(o.x + 21, o.y + 4) controlPoint1:NSMakePoint(o.x + 12, o.y - 1) controlPoint2:NSMakePoint(o.x + 20, o.y - 1)];
+         else l(18, 8);
+      }
+      [[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(o.x + 17.5, o.y + 4, 8, 8)] fill];
+      width = 1.2;
+      break;
+   }
+   case 8: m(1, 8); l(25, 8); m(20, 3.5); l(25, 8); l(20, 12.5); break;       /* FX THRU */
+   case 9:                                                                    /* FX REVERB: echoes dying away */
+      for (int k = 0; k < 9; ++k) { m(1 + 3 * k, 15); l(1 + 3 * k, 15 - 14 * exp(-k / 3.0)); }
+      break;
+   case 10:                                                                   /* FX CHORUS: the sound's three moving copies */
+      for (int k = 0; k < 3; ++k) curve(^(double x) { return 8 - 6 * sin(2 * M_PI * (x - 0.11 * (k - 1))); });
+      width = 1.1;
+      break;
+   case 11: m(1, 1); l(1, 15); l(25, 15); m(1, 15); l(12, 5); l(25, 2.5); break;   /* FX DYNAMIX: out against in */
+   case 12: m(0, 8); l(6.5, 8); ring(13, 8, 6.5); m(19.5, 8); l(26, 8); m(10, 5); l(16, 11); m(16, 5); l(10, 11); break;   /* FX RINGMOD */
+   case 13:                                                                   /* FX PHASER: six all-pass stages, three notches */
+      curve(^(double x) { double y = 2.5; for (int k = 0; k < 3; ++k) y += 11.5 * exp(-pow((x - 0.18 - 0.32 * k) / 0.035, 2)); return y; });
+      break;
+   case 14: curve(^(double x) { return 14.5 - 12.5 / (1 + 12 * pow(sin(4 * M_PI * (x - 0.125)), 2)); }); break;   /* FX FLANGER: a comb's peaks */
+   }
+   b.lineWidth = width;
+   b.lineJoinStyle = NSLineJoinStyleRound;
+   b.lineCapStyle = NSLineCapStyleRound;
+   [b stroke];
+}
+
 @interface MTEditorView : NSView <NSTextFieldDelegate>
 - (instancetype)initWithPlugin:(const clap_plugin_t *)plugin ui:(MtUi *)ui;
 - (void)startRefresh;
@@ -208,7 +271,7 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
 
    for (int s = 0; s < 5; ++s) {
       const CGFloat x = 16 + 240 * s;
-      if (s < 4) [self add:C_TITLE id:0 section:s rect:NSMakeRect(x, 12, 228, 30) label:kSection[s]];
+      if (s < 4) [self add:C_TITLE id:0 section:s rect:NSMakeRect(x, 12, 228, 30) label:s ? kSection[s] : _p->desc->name + strlen("Mono Track ")];
       for (int k = 0; k < 8; ++k)
          [self add:C_KNOB id:s < 4 ? s * 8 + k : k section:s
               rect:NSMakeRect(x + 6 + (k % 4) * 54, 52 + (k / 4) * 106, 54, 104) label:NULL];
@@ -390,9 +453,17 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
 
 - (void)drawTitle:(const Ctl *)c {
    const int n = [self held] ? [self heldLocksInSection:c->section lfo:0] : 0;
-   drawText(c->label, NSMakeRect(c->r.origin.x, c->r.origin.y + 5, c->r.size.width, 22), 15, NSFontWeightSemibold,
-            n ? C(LOCK, 1) : C(TEXT, 1), NSTextAlignmentCenter);
-   if (n) [self drawChip:n at:NSMakePoint(NSMidX(c->r) + 34, c->r.origin.y + 7)];
+   NSColor *color = n ? C(LOCK, 1) : C(TEXT, 1);
+   NSRect text = NSMakeRect(c->r.origin.x, c->r.origin.y + 5, c->r.size.width, 22);
+   CGFloat chip = NSMidX(c->r) + 34;
+   if (c->section == 0) {   /* the machine: its icon and name, centred together */
+      const CGFloat w = 9.3 * strlen(c->label), x = NSMidX(c->r) - (26 + 9 + w) / 2;   /* 9.3: the font's advance at 15 points */
+      drawIcon(mt_ui_machine(_p), NSMakePoint(x, c->r.origin.y + 6), color);
+      text = NSMakeRect(x + 35, text.origin.y, w + 8, 22);
+      chip = x + 35 + w + 9;
+   }
+   drawText(c->label, text, 15, NSFontWeightSemibold, color, c->section ? NSTextAlignmentCenter : NSTextAlignmentLeft);
+   if (n) [self drawChip:n at:NSMakePoint(chip, c->r.origin.y + 7)];
 }
 - (void)drawChip:(int)n at:(NSPoint)o {
    char t[4];

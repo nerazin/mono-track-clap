@@ -87,7 +87,7 @@ static const char *const features[MT_MACHINES][4] = {
 #undef FX
 };
 #define DESCRIPTOR(m) { .clap_version = CLAP_VERSION_INIT, .id = machines[m].id, .name = machines[m].name, \
-   .vendor = "Independent DSP", .url = "", .manual_url = "", .support_url = "", .version = "0.8.4", \
+   .vendor = "Independent DSP", .url = "", .manual_url = "", .support_url = "", .version = "0.8.5", \
    .description = MT_FX(m) ? "A whole Monomachine track around an FX machine: machine, EQ, filter, AMP, SRR, delay, LFOs, ported from its code" \
                            : "A whole Monomachine track: machine, EQ, filter, AMP, SRR, delay, LFOs, ported from its code", .features = features[m] }
 static const clap_plugin_descriptor_t descriptors[MT_MACHINES] = {
@@ -1304,6 +1304,7 @@ void mt_ui_set_length(const clap_plugin_t *p, int length) {
    mt_ui_pattern_changed(p, "Length");
 }
 int mt_ui_bipolar(const clap_plugin_t *p, int id) { return bipolar(((const Plugin *)p->plugin_data)->machine, id); }
+int mt_ui_machine(const clap_plugin_t *p) { return ((const Plugin *)p->plugin_data)->machine; }
 int mt_ui_unused(const clap_plugin_t *p, int id) { return hidden(((const Plugin *)p->plugin_data)->machine, id); }
 
 static bool gui_supported(const clap_plugin_t *p, const char *api, bool floating) { (void)p; return api && !strcmp(api, CLAP_WINDOW_API_COCOA) && !floating; }

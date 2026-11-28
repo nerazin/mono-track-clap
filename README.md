@@ -74,7 +74,8 @@ the same track as on the instruments.
 
 ## The editor
 
-The top row is the unit's data pages: SYN, AMP, FILT, EFX and LFO1-3. The right
+The top row is the unit's data pages: SYN, AMP, FILT, EFX and LFO1-3. The SYN page is titled
+with the machine's name, as the unit's OS names it, and an icon. The right
 column holds the track's settings, including VEL and KEY SETUP, and the bottom row 16 trigs: one page of the
 pattern. Pressing an
 LFO tab and sliding across the others switches to each one under the pointer.
@@ -419,7 +420,7 @@ the module ASSIGN, but on no remote-control page.
   the editor test, not against the firmware. The firmware checks cover the rule
   it follows and what a fill copies.
 - The FX plug-ins, the 64-step pattern, the VEL and KEY SETUP windows, typed
-  values, KEYBOARD CAPTURE on by default and the saved and default window sizes have not been tried by hand in Bitwig yet. Typing needs the host to pass keys to the
+  values, KEYBOARD CAPTURE on by default, the saved and default window sizes and the machine titles have not been tried by hand in Bitwig yet. Typing needs the host to pass keys to the
   plug-in's window; the editor test types through AppKit's own field editor.
 - Velocity and key were not compared with the unit's own keyboard, whose
   velocity curve (VELOCITY CURVE in the global settings) comes before them.
@@ -461,7 +462,7 @@ round trip; and the effects: their ports, defaults and latency, that each passes
 with no note at 44.1 and 48 kHz, INP at 0, a note reopening a closed AMP, RINGMOD's
 sidechain and POLY. `gui_test` opens the
 editor off-screen and drives it with mouse and key events, typed values included, resizes it, sets the default
-size (in a temporary home folder) and opens PHASER's editor. All three also pass
+size (in a temporary home folder), and opens every machine's editor. All three also pass
 under AddressSanitizer and UBSan and as an Intel build under Rosetta, and the
 bundle passes `clap-trap` at 44.1, 48 and 96 kHz.
 

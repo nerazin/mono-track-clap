@@ -49,6 +49,7 @@ void mt_ui_resized(const clap_plugin_t *p);   /* the editor's new size has settl
 void mt_ui_set_length(const clap_plugin_t *p, int length);   /* fills pages it reaches, as the unit does */
 int mt_ui_bipolar(const clap_plugin_t *p, int id);
 int mt_ui_unused(const clap_plugin_t *p, int id);
+int mt_ui_machine(const clap_plugin_t *p);   /* MT_SIN.. of mono_track.h */
 
 /* The editor (mono_track_gui.m). */
 enum { MT_GUI_W = 1368, MT_GUI_H = 388 };

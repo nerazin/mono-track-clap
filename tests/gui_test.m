@@ -31,6 +31,8 @@
  *  - the size: saved in the state but not in a preset, not moved by a load once the editor was
  *    opened, marked dirty once when a resize has paused and never by opening; SET AS DEFAULT SIZE
  *    makes new instances and old states open at it, and a bad settings file is the design size
+ *  - every machine's title: its own icon, plain until a held step locks one of its knobs, then
+ *    amber with the count after the name
  *  - with no font, or an exception while drawing, the editor draws on and logs it
  *  - a trig is one named step in the host's undo, a lock drag one step, and no change stays open */
 #import <Cocoa/Cocoa.h>
@@ -167,15 +169,28 @@ static void shot(const char *dir, const char *name) {
    [png writeToFile:[NSString stringWithFormat:@"%s/%s.png", dir, name] atomically:YES];
 }
 
-static uint64_t viewHash(void) {
-   const NSRect knobs = NSMakeRect(0, 44, MT_GUI_W - 150, 226);   /* the panels: the trig LEDs pulse with time */
+static uint64_t rectHash(NSRect r) {
    [V setNeedsDisplay:YES];
-   NSBitmapImageRep *rep = [V bitmapImageRepForCachingDisplayInRect:knobs];
-   [V cacheDisplayInRect:knobs toBitmapImageRep:rep];
+   NSBitmapImageRep *rep = [V bitmapImageRepForCachingDisplayInRect:r];
+   [V cacheDisplayInRect:r toBitmapImageRep:rep];
    uint64_t h = 0xcbf29ce484222325ULL;
    const unsigned char *d = rep.bitmapData;
    for (NSInteger i = 0; i < rep.bytesPerRow * rep.pixelsHigh; ++i) h = (h ^ d[i]) * 0x100000001b3ULL;
    return h;
+}
+static uint64_t viewHash(void) { return rectHash(NSMakeRect(0, 44, MT_GUI_W - 150, 226)); }   /* the panels: the trig LEDs pulse with time */
+/* Pixels of the lock colour in a rect of the view. */
+static int amber(NSRect r) {
+   [V setNeedsDisplay:YES];
+   NSBitmapImageRep *rep = [V bitmapImageRepForCachingDisplayInRect:r];
+   [V cacheDisplayInRect:r toBitmapImageRep:rep];
+   int n = 0;
+   for (NSInteger y = 0; y < rep.pixelsHigh; ++y)
+      for (NSInteger x = 0; x < rep.pixelsWide; ++x) {
+         const unsigned char *q = rep.bitmapData + y * rep.bytesPerRow + x * rep.bitsPerPixel / 8;
+         n += q[0] > 180 && q[1] > 100 && q[1] < 210 && q[2] < 110;
+      }
+   return n;
 }
 /* Pixels of the host-modulation colour in the knob panels. */
 static int violet(void) {
@@ -1270,6 +1285,41 @@ int main(int argc, char **argv) {
       g->destroy(P);
       [W close];
       P->destroy(P);
+   }
+
+   /* every machine's title */
+   {
+      uint64_t icon[15];
+      CHECK(f->get_plugin_count(f) == 15, "fifteen machines");
+      for (int m = 0; m < 15; ++m) {
+         P = f->create_plugin(f, &host, f->get_plugin_descriptor(f, (uint32_t)m)->id);
+         CHECK(P && P->init(P), "create %d", m);
+         PA = P->get_extension(P, CLAP_EXT_PARAMS);
+         const clap_plugin_gui_t *g = P->get_extension(P, CLAP_EXT_GUI);
+         CHECK(g->create(P, CLAP_WINDOW_API_COCOA, false), "gui %d", m);
+         W = [[NSWindow alloc] initWithContentRect:NSMakeRect(-6000, -6000, MT_GUI_W, MT_GUI_H) styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
+         W.releasedWhenClosed = NO;
+         clap_window_t pw = {CLAP_WINDOW_API_COCOA, {(__bridge void *)W.contentView}};
+         CHECK(g->set_parent(P, &pw) && g->show(P), "parent/show %d", m);
+         V = W.contentView.subviews.firstObject;
+         const char *name = P->desc->name + strlen("Mono Track ");
+         const CGFloat tw = 9.3 * strlen(name), x = 130 - (35 + tw) / 2;   /* the icon, 26 wide, then the name, centred over the panel */
+         const NSRect ri = NSMakeRect(x - 1, 17, 28, 18), rn = NSMakeRect(x + 35, 17, tw, 22), rc = NSMakeRect(x + 35 + tw + 9, 19, 16, 15);
+         CHECK(brightIn(ri) > 20 && brightIn(rn) > 100 && !amber(NSMakeRect(16, 12, 228, 30)), "%s's title", name);
+         icon[m] = rectHash(ri);
+         for (int k = 0; k < m; ++k) CHECK(icon[k] != icon[m], "machines %d and %d have the same icon", k, m);
+         /* a held step's locks: amber, with their count after the name and inside the panel's width */
+         CHECK(!brightIn(rc) && NSMaxX(rc) < 244, "%s: no room for the count", name);
+         right(padx(3), PADY);
+         drag(kx(0, 7), ky(7), -20);   /* TUNE or INP, which every machine has */
+         CHECK(lockv(3, P_SYN + 7) >= 0 && amber(ri) > 10 && amber(rn) > 50 && amber(rc) > 50, "%s: the lock does not show", name);
+         if (!strcmp(name, "FX DYNAMIX")) shot(dir, "19_title_lock");
+         right(padx(3), PADY);
+         CHECK(!amber(NSMakeRect(16, 12, 228, 30)), "%s: amber with no step held", name);
+         g->destroy(P);
+         [W close];
+         P->destroy(P);
+      }
    }
    entry->deinit();
    CHECK(!undoOpen && undoSteps > 0, "an undo change left open (%d steps)", undoSteps);
