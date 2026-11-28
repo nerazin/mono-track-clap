@@ -86,7 +86,7 @@ static const char *const features[MT_MACHINES][4] = {
 #undef FX
 };
 #define DESCRIPTOR(m) { .clap_version = CLAP_VERSION_INIT, .id = machines[m].id, .name = machines[m].name, \
-   .vendor = "Independent DSP", .url = "", .manual_url = "", .support_url = "", .version = "0.8.2", \
+   .vendor = "Independent DSP", .url = "", .manual_url = "", .support_url = "", .version = "0.8.3", \
    .description = MT_FX(m) ? "A whole Monomachine track around an FX machine: machine, EQ, filter, AMP, SRR, delay, LFOs, ported from its code" \
                            : "A whole Monomachine track: machine, EQ, filter, AMP, SRR, delay, LFOs, ported from its code", .features = features[m] }
 static const clap_plugin_descriptor_t descriptors[MT_MACHINES] = {

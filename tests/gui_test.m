@@ -4,8 +4,8 @@
  *    latch a hold; a drag on a knob then writes a lock, not the kit value
  *  - clicking a knob while holding locks / unlocks it; CLR LOCKS clears the step
  *  - VEL and KEY SETUP open KIT ASSIGN's rows in windows that take the mouse while open
- *  - the keyboard is ignored until KEYBOARD CAPTURE is on; 12345678qwertyui then hold
- *    trigs, by physical key; other keys stay the host's
+ *  - KEYBOARD CAPTURE is on in every new editor and survives a hide: 12345678qwertyui hold
+ *    trigs, by physical key; other keys stay the host's; off, the keyboard is ignored
  *  - holds end when the window hides, closes, or (for keys) loses focus
  *  - a drag is one gesture; a drag cut short by closing still ends its gesture
  *  - a modulated knob keeps its needle at the base; turning a stepped knob shows no modulation
@@ -314,6 +314,7 @@ int main(int argc, char **argv) {
    CHECK(gui->set_parent(P, &cw) && gui->show(P), "parent/show");
    V = W.contentView.subviews.firstObject;
    CHECK(V, "the editor view");
+   CHECK(W.firstResponder == V, "the editor opens with the keys");
    shot(dir, "1_default");
 
    /* no font (it closed Bitwig's plug-in host on 2026-11-27) skips the text, and an exception
@@ -425,11 +426,13 @@ int main(int argc, char **argv) {
    drag(kx(2, 3), ky(3), -30);
    CHECK(val(P_FILT + 3) > v1 && lockv(4, P_FILT + 3) == -1, "a hold survived hide");
 
-   /* the keyboard is ignored until KEYBOARD is on */
-   CHECK(W.firstResponder != V, "first responder before KEYS");
+   /* the keyboard is ignored while KEYBOARD CAPTURE is off; it was on until here */
+   CHECK(W.firstResponder == V, "hiding lost the keys");
+   const NSRect keysRow = NSMakeRect(1224, 12 + 53 * 6, 128, 44);
+   click(NSMidX(keysRow), NSMidY(keysRow));
+   CHECK(W.firstResponder != V, "first responder with KEYS off");
    tap(18);
    CHECK(trigs() == 1 << 4, "key with capture off");
-   const NSRect keysRow = NSMakeRect(1224, 12 + 53 * 6, 128, 44);
    click(NSMidX(keysRow), NSMidY(keysRow));
    CHECK(W.firstResponder == V, "first responder after KEYS");
    static const unsigned short codes[16] = {18, 19, 20, 21, 23, 22, 26, 28, 12, 13, 14, 15, 17, 16, 32, 34};
@@ -460,6 +463,7 @@ int main(int argc, char **argv) {
    flush();
    CHECK(ends == 1, "gesture ended on hide");
    gui->show(P);
+   CHECK(W.firstResponder != V, "showing the editor took the keys with KEYS off");
 
    /* the window closing releases a latched hold */
    right(padx(7), PADY);
@@ -1122,6 +1126,16 @@ int main(int argc, char **argv) {
 
    gui->destroy(P);
    CHECK(W.contentView.subviews.count == 0, "removed");
+
+   /* capture was off just now; a new editor of the same plug-in does not remember that */
+   CHECK(gui->create(P, CLAP_WINDOW_API_COCOA, false) && gui->set_parent(P, &cw), "reopen");
+   V = W.contentView.subviews.firstObject;
+   CHECK(W.firstResponder == V, "a new editor remembered capture off, or waits for show to take the keys");
+   CHECK(gui->show(P), "show");
+   const uint64_t trigs0 = trigs();
+   tap(18);
+   CHECK((trigs() ^ trigs0) == 1, "a key in a new editor");
+   gui->destroy(P);
    [W close];
    P->destroy(P);
 

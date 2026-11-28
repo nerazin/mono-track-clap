@@ -133,7 +133,7 @@ filter envelope and the LFOs, and ends locks.
 | **CPY** / **PST** under a selected trig | Copy the step's trig and all its locks, or replace this step with the copy. A trig is selected by a right-click latch or a held key. PST is gray until something is copied, and CPY is gray on an empty step. The copy lasts while the plug-in is loaded and is not saved with the project. |
 | **CLR LOCKS** | Remove all locks from the held steps |
 | **NOTE ENDS** (on by default) | A MIDI note ends the locks of earlier steps. Off, only a trig or Stop ends them, as on the unit. |
-| **KEYBOARD CAPTURE** on (off by default) | `12345678` and `QWERTYUI` act as the 16 trigs of the page shown: tap to toggle, hold to edit. They follow the key's position, so any keyboard layout works. Other keys stay with the host. |
+| **KEYBOARD CAPTURE** (on each time the editor opens; not saved) | `12345678` and `QWERTYUI` act as the 16 trigs of the page shown: tap to toggle, hold to edit. They follow the key's position, so any keyboard layout works. Other keys stay with the host. The editor takes keys only while its window has the focus; off, all keys stay with the host. |
 
 **VEL** and **KEY SETUP** are the unit's KIT ASSIGN window, its KEY VEL and KEY
 TRK tabs. Each opens a small window over the LFO page with two rows of **PAGE**,
@@ -410,8 +410,8 @@ the module ASSIGN, but on no remote-control page.
 - The plug-in's own page fill (the editor's LEN and page buttons) is checked by
   the editor test, not against the firmware. The firmware checks cover the rule
   it follows and what a fill copies.
-- The FX plug-ins, the 64-step pattern, the VEL and KEY SETUP windows and typed
-  values have not been tried by hand in Bitwig yet. Typing needs the host to pass keys to the
+- The FX plug-ins, the 64-step pattern, the VEL and KEY SETUP windows, typed
+  values and KEYBOARD CAPTURE on by default have not been tried by hand in Bitwig yet. Typing needs the host to pass keys to the
   plug-in's window; the editor test types through AppKit's own field editor.
 - Velocity and key were not compared with the unit's own keyboard, whose
   velocity curve (VELOCITY CURVE in the global settings) comes before them.

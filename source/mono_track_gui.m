@@ -30,7 +30,7 @@
 #endif
 
 /* Plug-ins share one host process, and Objective-C classes one namespace: the version keeps builds apart. */
-#define MTEditorView MonoTrackEditorView_0_8_2
+#define MTEditorView MonoTrackEditorView_0_8_3
 
 enum { C_TITLE, C_KNOB, C_TAB, C_SLIDER, C_SWITCH, C_KEYS, C_PAD, C_CLEAR, C_COPY, C_PASTE, C_LEN, C_SPEED, C_PAGE, C_SETUP, C_CLOSE, C_MAX = 160 };
 /* Controls of the setup windows have these sections: KIT ASSIGN's KEY VEL and KEY TRK tabs. */
@@ -118,6 +118,7 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
 - (void)startRefresh;
 - (void)stopRefresh;
 - (void)closeEditing;
+- (void)takeKeys;
 @end
 
 @implementation MTEditorView {
@@ -171,6 +172,7 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
    _params = plugin->get_extension(plugin, CLAP_EXT_PARAMS);
    for (int i = 0; i < NPARAM; ++i) _params->get_info(plugin, (clap_id)i, &_info[i]);
    _dragCtl = _dragId = _scrollId = _flashCtl = _setup = _hover = _fieldCtl = -1;
+   _keys = YES;   /* on in every new editor, never saved */
    [self addTrackingArea:[[NSTrackingArea alloc] initWithRect:NSZeroRect
                                                       options:NSTrackingMouseMoved | NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect
                                                         owner:self userInfo:nil]];
@@ -969,10 +971,13 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
    [nc addObserver:self selector:@selector(windowBecameKey:) name:NSWindowDidBecomeKeyNotification object:self.window];
    [nc addObserver:self selector:@selector(windowClosing:) name:NSWindowWillCloseNotification object:self.window];
    [self startRefresh];
+   [self takeKeys];   /* the window may be key already */
 }
+/* Does not make the window key: the editor takes keys only once its window has the focus. */
+- (void)takeKeys { if (_keys && !_field) [self.window makeFirstResponder:self]; }
 /* A key released while another window has focus never arrives. */
 - (void)windowResigned:(NSNotification *)n { (void)n; _heldKey = 0; [self closeField:2]; }
-- (void)windowBecameKey:(NSNotification *)n { (void)n; if (_keys && !_field) [self.window makeFirstResponder:self]; }
+- (void)windowBecameKey:(NSNotification *)n { (void)n; [self takeKeys]; }
 - (void)windowClosing:(NSNotification *)n { (void)n; [self closeEditing]; }
 
 /* The window is going away: no trig stays held and no gesture stays open. */
@@ -1282,6 +1287,7 @@ void mt_gui_show(void *gui) {
    MTEditorView *v = (__bridge MTEditorView *)gui;
    v.hidden = NO;
    [v startRefresh];
+   [v takeKeys];   /* hiding gave them up */
 }
 void mt_gui_hide(void *gui) {
    MTEditorView *v = (__bridge MTEditorView *)gui;
