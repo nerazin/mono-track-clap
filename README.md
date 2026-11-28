@@ -82,6 +82,18 @@ The top-left corner shows, faintly, the name, the version and the commit the
 build came from, such as `Mono Track 0.8.0 (ff94ab5)`. A `+` after the commit marks a build with
 uncommitted changes.
 
+The editor runs in the host's process, so it never lets an error out of its drawing: an exception
+there would close the host with every plug-in in it. A text it cannot draw (the system returned no font
+or colour) is skipped for that redraw. Both cases are written to `~/Library/Logs/Mono Track.log`,
+at most 200 lines per process. Before 0.8.1, a missing font closed Bitwig's plug-in host.
+
+Each edit of the pattern (a trig, a lock, CLR LOCKS, PST, SPEED, LEN) is a named step in the
+host's undo list (CLAP's `clap.undo/4`, with a state snapshot), and a drag or a scroll is one step.
+The pattern is not made of parameters, so a host that rebuilds a plug-in from its undo history
+needs these steps. Bitwig does that after its plug-in host crashes. Before 0.8.1 the editor only marked the state dirty,
+and such a rebuild brought back the knobs but not the trigs, locks or SCALE. Hosts without
+`clap.undo/4` are still told the state changed.
+
 Each LFO tab shows its LFO: the wave it plays over one cycle, on a zero line,
 and a dot where it is now, trailing a short light-blue plume. The wave is drawn from its shape rather than from
 samples, so it stays clean at any speed. RND shows its eight steps as they are

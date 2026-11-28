@@ -37,7 +37,9 @@ typedef struct {
 void mt_ui_begin(const clap_plugin_t *p, int id);
 void mt_ui_set(const clap_plugin_t *p, int id, double value);   /* outside begin/end it is one whole gesture */
 void mt_ui_end(const clap_plugin_t *p, int id);
-void mt_ui_pattern_changed(const clap_plugin_t *p);
+void mt_ui_pattern_changed(const clap_plugin_t *p, const char *what);   /* one undo step, named, unless a change is open */
+void mt_ui_change_begin(const clap_plugin_t *p);   /* the edits until mt_ui_change_end are one undo step */
+void mt_ui_change_end(const clap_plugin_t *p);
 void mt_ui_set_length(const clap_plugin_t *p, int length);   /* fills pages it reaches, as the unit does */
 int mt_ui_bipolar(const clap_plugin_t *p, int id);
 int mt_ui_unused(const clap_plugin_t *p, int id);

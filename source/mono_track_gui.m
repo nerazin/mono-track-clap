@@ -21,6 +21,8 @@
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
+#include <unistd.h>
 #include "mono_track_ui.h"
 
 #ifndef MT_COMMIT
@@ -28,7 +30,7 @@
 #endif
 
 /* Plug-ins share one host process, and Objective-C classes one namespace: the version keeps builds apart. */
-#define MTEditorView MonoTrackEditorView_0_8_0
+#define MTEditorView MonoTrackEditorView_0_8_1
 
 enum { C_TITLE, C_KNOB, C_TAB, C_SLIDER, C_SWITCH, C_KEYS, C_PAD, C_CLEAR, C_COPY, C_PASTE, C_LEN, C_SPEED, C_PAGE, C_SETUP, C_CLOSE, C_MAX = 160 };
 /* Controls of the setup windows have these sections: KIT ASSIGN's KEY VEL and KEY TRK tabs. */
@@ -53,12 +55,36 @@ enum : unsigned { BG = 0x141518, PANEL = 0x1d1f24, LINE = 0x31343c, TEXT = 0xd5d
                   LOCK = 0xffb020, MOD = 0xb18cff, TRIG = 0xff453a, TRIGLESS = 0x32d74b, NOTE = 0x4cc9ff, DARK = 0x101114,
                   FAST = 0xff5fa2, PLUME = 0x8fd3ff };   /* an LFO too quick for its graph's dot to follow; the dot's plume */
 
+/* Problems the editor got past, appended to ~/Library/Logs/Mono Track.log (first 200 per process). */
+static void logLine(NSString *what) {
+   static int lines;
+   const char *home = getenv("HOME");   /* not NSHomeDirectory(), so gui_test can point it elsewhere */
+   if (lines++ >= 200 || !home) return;
+   char path[1024];
+   snprintf(path, sizeof path, "%s/Library/Logs/Mono Track.log", home);
+   FILE *f = fopen(path, "a");
+   if (!f) return;
+   char ts[32];
+   const time_t t = time(NULL);
+   strftime(ts, sizeof ts, "%Y-%m-%d %H:%M:%S", localtime(&t));
+   fprintf(f, "%s pid %d: %s\n", ts, getpid(), what.UTF8String);
+   fclose(f);
+}
+
 static void drawText(const char *s, NSRect r, CGFloat size, NSFontWeight w, NSColor *color, NSTextAlignment align) {
+   NSFont *font = [NSFont monospacedSystemFontOfSize:size weight:w];
    NSMutableParagraphStyle *p = [NSMutableParagraphStyle new];
+   if (!font || !color || !p) {   /* a nil in the literal below throws, and AppKit then kills the host (2026-11-27) */
+      static time_t said;   /* one line a second: a failing redraw skips every text */
+      if (time(NULL) != said) {
+         said = time(NULL);
+         logLine([NSString stringWithFormat:@"drawText \"%s\" skipped: font %p, color %p, style %p", s, font, color, p]);
+      }
+      return;
+   }
    p.alignment = align;
    p.lineBreakMode = NSLineBreakByClipping;
-   NSDictionary *a = @{NSFontAttributeName: [NSFont monospacedSystemFontOfSize:size weight:w],
-                       NSForegroundColorAttributeName: color, NSParagraphStyleAttributeName: p};
+   NSDictionary *a = @{NSFontAttributeName: font, NSForegroundColorAttributeName: color, NSParagraphStyleAttributeName: p};
    [[NSString stringWithUTF8String:s] drawInRect:r withAttributes:a];
 }
 static void fillRound(NSRect r, CGFloat radius, NSColor *c) {
@@ -261,6 +287,13 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
 
 - (void)drawRect:(NSRect)dirty {
    (void)dirty;
+   @try {
+      [self drawAll];
+   } @catch (NSException *e) {   /* thrown out of drawRect:, it ends the host process and every plug-in in it */
+      logLine([NSString stringWithFormat:@"drawRect: %@: %@\n%@", e.name, e.reason, e.callStackSymbols]);
+   }
+}
+- (void)drawAll {
    CGContextRef g = NSGraphicsContext.currentContext.CGContext;
    [C(BG, 1) setFill];
    NSRectFill(self.bounds);
@@ -437,7 +470,10 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
 /* The value's text, hugged: lit under the mouse. */
 - (NSRect)valueBox:(const Ctl *)c {
    static CGFloat cw;   /* the monospaced font's advance */
-   if (!cw) cw = [@"0" sizeWithAttributes:@{NSFontAttributeName: [NSFont monospacedSystemFontOfSize:10 weight:NSFontWeightRegular]}].width;
+   if (!cw) {
+      NSFont *font = [NSFont monospacedSystemFontOfSize:10 weight:NSFontWeightRegular];
+      if (font) cw = [@"0" sizeWithAttributes:@{NSFontAttributeName: font}].width;
+   }
    char t[CLAP_NAME_SIZE];
    [self valueOf:c text:t];
    const char *ratio = strstr(t, " (");
@@ -524,7 +560,7 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
       const int8_t x = (int8_t)lrint([self clampTo:_fieldId value:v]);
       for (int t = 0; t < UI_STEPS; ++t)
          if (_fieldSteps >> t & 1) atomic_store_explicit(&_ui->lock[t][_fieldId], x, memory_order_relaxed);
-      mt_ui_pattern_changed(_p);
+      [self changed:"Lock" param:_fieldId];
    } else if (ok) mt_ui_set(_p, _fieldId, v);
    [self.window makeFirstResponder:_keys ? self : nil];
    [f removeFromSuperview];
@@ -595,7 +631,7 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
    for (int id = 0; id < UI_LOCKS; ++id) atomic_store_explicit(&_ui->lock[step][id], _ui->clip_lock[id], memory_order_relaxed);
    if (_ui->clip_trig) atomic_fetch_or_explicit(&_ui->trig, 1ull << step, memory_order_relaxed);
    else atomic_fetch_and_explicit(&_ui->trig, ~(1ull << step), memory_order_relaxed);
-   mt_ui_pattern_changed(_p);
+   mt_ui_pattern_changed(_p, "Paste Step");
 }
 
 /* The LED above a trig. The whole bar is the unit's LED colour (red trig, green
@@ -920,9 +956,11 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
    if (_dragGesture) mt_ui_end(_p, _dragId);
    _dragGesture = NO;
    _dragCtl = _dragId = -1;
+   mt_ui_change_end(_p);
 }
 - (void)endScroll {
    if (_scrollId >= 0 && !_scrollIsLock) mt_ui_end(_p, _scrollId);
+   if (_scrollId >= 0 && _scrollIsLock) mt_ui_change_end(_p);
    _scrollId = -1;
 }
 /* A twist belongs to the trigs held when it began. When they change, the rest of it
@@ -948,24 +986,30 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
    }
    return -1;
 }
+/* An edit of the pattern, named for the host's undo list: "Lock FILT BASE". */
+- (void)changed:(const char *)what param:(int)ident {
+   char t[64];
+   snprintf(t, sizeof t, "%s %s", what, _info[ident].name);
+   mt_ui_pattern_changed(_p, t);
+}
 - (void)writeLock:(int)ident value:(double)v {
    const unsigned h = [self held];
    const int8_t x = (int8_t)lrint([self clampTo:ident value:v]);
    for (int t = 0; t < UI_PAGE; ++t)
       if (h >> t & 1) atomic_store_explicit(&_ui->lock[[self stepOf:t]][ident], x, memory_order_relaxed);
    _edited |= h;
-   mt_ui_pattern_changed(_p);
+   [self changed:"Lock" param:ident];
 }
 - (void)clearLock:(int)ident {
    const unsigned h = [self held];
    for (int t = 0; t < UI_PAGE; ++t)
       if (h >> t & 1) atomic_store_explicit(&_ui->lock[[self stepOf:t]][ident], -1, memory_order_relaxed);
    _edited |= h;
-   mt_ui_pattern_changed(_p);
+   [self changed:"Unlock" param:ident];
 }
 - (void)toggleTrig:(int)step {
    atomic_fetch_xor_explicit(&_ui->trig, 1ull << [self stepOf:step], memory_order_relaxed);
-   mt_ui_pattern_changed(_p);
+   mt_ui_pattern_changed(_p, "Trig");
 }
 - (void)padDown:(int)step { _downAt[step] = CACurrentMediaTime(); _edited &= ~(1u << step); }
 /* A tap toggles the trig; a longer press, or one that edited a lock, leaves it alone. */
@@ -1009,13 +1053,14 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
    case C_CLOSE: [self showSetup:-1]; break;
    case C_SPEED:
       atomic_store_explicit(&_ui->speed, (int8_t)((atomic_load_explicit(&_ui->speed, memory_order_relaxed) + 1) & 3), memory_order_relaxed);
-      mt_ui_pattern_changed(_p);
+      mt_ui_pattern_changed(_p, "Speed");
       break;
    case C_LEN:
       if (e.clickCount == 2) { mt_ui_set_length(_p, 16); break; }
       _lenValue = [self length];
       _dragCtl = i;
       _dragLast = pt;
+      mt_ui_change_begin(_p);
       break;
    case C_KEYS: [self setKeys:!_keys]; break;
    case C_SWITCH: mt_ui_set(_p, c->id, [self base:c->id] >= 0.5 ? 0 : 1); break;
@@ -1033,7 +1078,7 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
          if (h >> t & 1)
             for (int id = 0; id < UI_LOCKS; ++id) atomic_store_explicit(&_ui->lock[[self stepOf:t]][id], -1, memory_order_relaxed);
       _edited |= h;
-      mt_ui_pattern_changed(_p);
+      mt_ui_pattern_changed(_p, "Clear Locks");
       break;
    }
    case C_KNOB: case C_SLIDER: {
@@ -1053,6 +1098,7 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
       _dragMoved = NO;
       _dragGesture = !lockEdit;
       if (!lockEdit) mt_ui_begin(_p, ident);
+      else mt_ui_change_begin(_p);   /* ended by mouseUp or endDrag */
       break;
    }
    }
@@ -1105,6 +1151,7 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
    }
    _dragCtl = _dragId = -1;
    _dragGesture = NO;
+   mt_ui_change_end(_p);
    [self hoverAt:e];
    [self tick:nil];
 }
@@ -1146,6 +1193,7 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
       _scrollIsLock = lockEdit;
       _scrollValue = [self shown:ident];
       if (!lockEdit) mt_ui_begin(_p, ident);
+      else mt_ui_change_begin(_p);   /* ended by endScroll */
    }
    _scrollUntil = now + kScrollPause;
    _scrollValue = fmin(fmax(_scrollValue + delta, info->min_value), info->max_value);   /* the float keeps small trackpad moves adding up */

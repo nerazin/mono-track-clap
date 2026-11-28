@@ -19,6 +19,7 @@
  *  - sample-rate conversion when the host does not run at 44.1 kHz.
  * SPDX-License-Identifier: GPL-3.0-only */
 #include <clap/clap.h>
+#include <clap/ext/draft/undo.h>
 #include <math.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -85,7 +86,7 @@ static const char *const features[MT_MACHINES][4] = {
 #undef FX
 };
 #define DESCRIPTOR(m) { .clap_version = CLAP_VERSION_INIT, .id = machines[m].id, .name = machines[m].name, \
-   .vendor = "Independent DSP", .url = "", .manual_url = "", .support_url = "", .version = "0.8.0", \
+   .vendor = "Independent DSP", .url = "", .manual_url = "", .support_url = "", .version = "0.8.1", \
    .description = MT_FX(m) ? "A whole Monomachine track around an FX machine: machine, EQ, filter, AMP, SRR, delay, LFOs, ported from its code" \
                            : "A whole Monomachine track: machine, EQ, filter, AMP, SRR, delay, LFOs, ported from its code", .features = features[m] }
 static const clap_plugin_descriptor_t descriptors[MT_MACHINES] = {
@@ -219,6 +220,8 @@ typedef struct {
    _Atomic bool pattern_loaded;       /* new state: the sounding locks are stale */
    _Atomic uint8_t ui_flag[NPARAM];   /* editor -> host: see UI_* */
    bool ui_open[NPARAM];              /* gestures the host has been told about */
+   bool undo_long;                    /* the host's undo has a change open (main thread) */
+   char undo_name[64];                /* the open change's last edit */
    MtUi ui;
    void *gui;
    uint32_t gui_w, gui_h;
@@ -1194,10 +1197,39 @@ void mt_ui_end(const clap_plugin_t *p, int id) {
    atomic_fetch_and_explicit(&s->ui_flag[id], (uint8_t)~UI_WANT, memory_order_acq_rel);
    ui_request_flush(s);
 }
-void mt_ui_pattern_changed(const clap_plugin_t *p) {
-   const Plugin *s = p->plugin_data;
-   const clap_host_state_t *hs = s->host->get_extension ? s->host->get_extension(s->host, CLAP_EXT_STATE) : NULL;
-   if (hs && hs->mark_dirty) hs->mark_dirty(s->host);
+/* The pattern is not parameters, so a host that rebuilds a plug-in from parameter moves
+ * (Bitwig's crash recovery and undo) loses it unless each edit is an undo step with a
+ * state snapshot (2026-11-27). Hosts without undo are only told the state is dirty. */
+static const clap_host_undo_t *host_undo(const Plugin *s) {
+   const clap_host_undo_t *u = s->host->get_extension ? s->host->get_extension(s->host, CLAP_EXT_UNDO) : NULL;
+   return u && u->begin_change && u->cancel_change && u->change_made ? u : NULL;
+}
+void mt_ui_pattern_changed(const clap_plugin_t *p, const char *what) {
+   Plugin *s = p->plugin_data;
+   const clap_host_undo_t *u = host_undo(s);
+   if (u && s->undo_long) snprintf(s->undo_name, sizeof s->undo_name, "%s", what);   /* named when it ends */
+   else if (u) u->change_made(s->host, what, NULL, 0, false);
+   else {
+      const clap_host_state_t *hs = s->host->get_extension ? s->host->get_extension(s->host, CLAP_EXT_STATE) : NULL;
+      if (hs && hs->mark_dirty) hs->mark_dirty(s->host);
+   }
+}
+/* A drag or a scroll: its edits are one undo step. */
+void mt_ui_change_begin(const clap_plugin_t *p) {
+   Plugin *s = p->plugin_data;
+   const clap_host_undo_t *u = host_undo(s);
+   if (!u || s->undo_long) return;
+   s->undo_long = true;
+   s->undo_name[0] = 0;
+   u->begin_change(s->host);
+}
+void mt_ui_change_end(const clap_plugin_t *p) {
+   Plugin *s = p->plugin_data;
+   const clap_host_undo_t *u = host_undo(s);
+   if (!u || !s->undo_long) return;
+   s->undo_long = false;
+   if (s->undo_name[0]) u->change_made(s->host, s->undo_name, NULL, 0, false);
+   else u->cancel_change(s->host);
 }
 /* SCALE SETUP's length, moved one step at a time as the unit's arrow keys move it, so
  * each page it reaches is filled as the unit fills it (mt_grow_page). The playhead
@@ -1212,6 +1244,7 @@ static bool page_empty(const Plugin *s, int page) {
 void mt_ui_set_length(const clap_plugin_t *p, int length) {
    Plugin *s = p->plugin_data;
    length = length < 2 ? 2 : length > MT_STEPS ? MT_STEPS : length;
+   if (seq_length(s) == length) return;
    for (int old = seq_length(s); old != length;) {
       const int to = old + (length > old ? 1 : -1);
       int src;
@@ -1226,7 +1259,7 @@ void mt_ui_set_length(const clap_plugin_t *p, int length) {
       atomic_store_explicit(&s->ui.length, (int8_t)to, memory_order_relaxed);
       old = to;
    }
-   mt_ui_pattern_changed(p);
+   mt_ui_pattern_changed(p, "Length");
 }
 int mt_ui_bipolar(const clap_plugin_t *p, int id) { return bipolar(((const Plugin *)p->plugin_data)->machine, id); }
 int mt_ui_unused(const clap_plugin_t *p, int id) { return hidden(((const Plugin *)p->plugin_data)->machine, id); }

@@ -25,13 +25,16 @@
  *    takes it, Esc drops it, text that reads as no value beeps; while a step is held it
  *    types the lock; a double-click elsewhere on the knob still resets it
  *  - an FX machine's editor (PHASER): its unused knob takes no typing, its INP
- *    reads 0.0 at 64 and takes a typed -6 */
+ *    reads 0.0 at 64 and takes a typed -6
+ *  - with no font, or an exception while drawing, the editor draws on and logs it
+ *  - a trig is one named step in the host's undo, a lock drag one step, and no change stays open */
 #import <Cocoa/Cocoa.h>
 #include <dlfcn.h>
 #include <objc/runtime.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <clap/ext/draft/undo.h>
 #include "../source/mono_track_ui.h"
 
 #define CHECK(c, ...) do { if (!(c)) { printf("FAIL line %d: ", __LINE__); printf(__VA_ARGS__); puts(""); exit(1); } } while (0)
@@ -43,7 +46,25 @@ static void h_rescan(const clap_host_t *h, clap_param_rescan_flags f) { (void)h;
 static void h_clear(const clap_host_t *h, clap_id i, clap_param_clear_flags f) { (void)h; (void)i; (void)f; }
 static void h_flush(const clap_host_t *h) { (void)h; ++flushes; }
 static const clap_host_params_t host_params = {h_rescan, h_clear, h_flush};
-static const void *host_ext(const clap_host_t *h, const char *id) { (void)h; return !strcmp(id, CLAP_EXT_PARAMS) ? &host_params : NULL; }
+/* the host's undo: each pattern edit is a step, a drag one step; a change left open fails the test */
+static int undoOpen, undoSteps, undoCancels;
+static char undoName[64];
+static void u_begin(const clap_host_t *h) { (void)h; CHECK(!undoOpen, "begin_change twice"); undoOpen = 1; }
+static void u_cancel(const clap_host_t *h) { (void)h; CHECK(undoOpen, "cancel_change with none open"); undoOpen = 0; ++undoCancels; }
+static void u_made(const clap_host_t *h, const char *name, const void *d, size_t n, bool can) {
+   (void)h; (void)d; (void)n; (void)can;
+   CHECK(name && *name, "change_made without a name");
+   snprintf(undoName, sizeof undoName, "%s", name);
+   undoOpen = 0;
+   ++undoSteps;
+}
+static void u_redo(const clap_host_t *h) { (void)h; }
+static void u_sub(const clap_host_t *h, bool b) { (void)h; (void)b; }
+static const clap_host_undo_t host_undo = {u_begin, u_cancel, u_made, u_redo, u_redo, u_sub};
+static const void *host_ext(const clap_host_t *h, const char *id) {
+   (void)h;
+   return !strcmp(id, CLAP_EXT_PARAMS) ? (const void *)&host_params : !strcmp(id, CLAP_EXT_UNDO) ? (const void *)&host_undo : NULL;
+}
 static void host_cb(const clap_host_t *h) { (void)h; }
 static const clap_host_t host = {CLAP_VERSION_INIT, NULL, "test", "", "", "1", host_ext, host_cb, host_cb, host_cb};
 
@@ -263,6 +284,11 @@ int main(int argc, char **argv) {
    @autoreleasepool {
    CHECK(argc > 1, "usage");
    const char *dir = argc > 2 ? argv[2] : NULL;
+   char home[1024], logs[1100];   /* the editor's log lands here, not in the user's Library */
+   snprintf(home, sizeof home, "%s/mt_gui_test.XXXXXX", getenv("TMPDIR") ? getenv("TMPDIR") : "/tmp");
+   CHECK(mkdtemp(home), "mkdtemp %s", home);
+   snprintf(logs, sizeof logs, "mkdir -p '%s/Library/Logs'", home);
+   CHECK(!system(logs) && !setenv("HOME", home, 1), "the test's HOME");
    [NSApplication sharedApplication];
    [NSApp setActivationPolicy:NSApplicationActivationPolicyProhibited];   /* never takes focus or shows on screen */
    char path[1024];
@@ -287,6 +313,27 @@ int main(int argc, char **argv) {
    V = W.contentView.subviews.firstObject;
    CHECK(V, "the editor view");
    shot(dir, "1_default");
+
+   /* no font (it closed Bitwig's plug-in host on 2026-11-27) skips the text, and an exception
+      stays inside drawing; both go to $HOME/Library/Logs/Mono Track.log */
+   {
+      Method m = class_getClassMethod(NSFont.class, @selector(monospacedSystemFontOfSize:weight:));
+      IMP font = method_getImplementation(m);
+      NSBitmapImageRep *rep = [V bitmapImageRepForCachingDisplayInRect:V.bounds];
+      method_setImplementation(m, imp_implementationWithBlock(^NSFont *(id c, CGFloat s, NSFontWeight w) { (void)c, (void)s, (void)w; return nil; }));
+      [V cacheDisplayInRect:V.bounds toBitmapImageRep:rep];
+      method_setImplementation(m, imp_implementationWithBlock(^NSFont *(id c, CGFloat s, NSFontWeight w) {
+         (void)c, (void)s, (void)w;
+         [NSException raise:@"TestFont" format:@"thrown by gui_test"];
+         return nil;
+      }));
+      [V cacheDisplayInRect:V.bounds toBitmapImageRep:rep];
+      method_setImplementation(m, font);
+      NSString *log = [NSString stringWithContentsOfFile:[NSString stringWithFormat:@"%s/Library/Logs/Mono Track.log", getenv("HOME")]
+                                                encoding:NSUTF8StringEncoding error:nil];
+      CHECK([log containsString:@"drawText \"MIDI TRIGS\" skipped: font 0x0"] && [log containsString:@"drawRect: TestFont: thrown by gui_test"],
+            "the log: %s", log.UTF8String);
+   }
 
    /* a press on an LFO tab slides across the tabs; leaving them keeps the last */
    mouse(NSEventTypeLeftMouseDown, 976 + 30, 30, 0, 1);
@@ -313,9 +360,11 @@ int main(int argc, char **argv) {
    mouse(NSEventTypeLeftMouseUp, kx(4, 0), ky(0), 0, 2);
    CHECK(val(P_LFO) == 0, "PAGE reset");
 
-   /* a click toggles a trig */
+   /* a click toggles a trig, one undo step */
+   undoSteps = 0;
    click(padx(0), PADY);
    CHECK(trigs() == 1, "click sets: %llx", (unsigned long long)trigs());
+   CHECK(undoSteps == 1 && !strcmp(undoName, "Trig") && !undoOpen, "the trig's undo: %d %s", undoSteps, undoName);
    click(padx(0), PADY);
    CHECK(trigs() == 0, "click clears");
    /* a long press only shows the step */
@@ -329,8 +378,10 @@ int main(int argc, char **argv) {
    right(padx(4), PADY);
    const int filtW = P_FILT + 1;
    const double before = val(filtW);
+   undoSteps = 0;
    drag(kx(2, 1), ky(1), 60);
    CHECK(val(filtW) == before, "a lock edit moved the kit value");
+   CHECK(undoSteps == 1 && !strcmp(undoName, "Lock FILT WDTH") && !undoOpen, "a lock drag is one undo step: %d %s", undoSteps, undoName);
    CHECK(lockv(4, filtW) >= 0 && lockv(4, filtW) < before, "lock: %d", lockv(4, filtW));
    /* click on an unlocked knob locks it at its value, click again unlocks */
    click(kx(1, 5), ky(5));
@@ -1052,6 +1103,7 @@ int main(int argc, char **argv) {
       P->destroy(P);
    }
    entry->deinit();
+   CHECK(!undoOpen && undoSteps > 0, "an undo change left open (%d steps)", undoSteps);
    }
    puts("PASS");
    return 0;

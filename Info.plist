@@ -8,7 +8,7 @@
   <key>CFBundleName</key><string>Mono Track</string>
   <key>CFBundleDisplayName</key><string>Mono Track</string>
   <key>CFBundlePackageType</key><string>BNDL</string>
-  <key>CFBundleShortVersionString</key><string>0.8.0</string>
-  <key>CFBundleVersion</key><string>21</string>
+  <key>CFBundleShortVersionString</key><string>0.8.1</string>
+  <key>CFBundleVersion</key><string>22</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
 </dict></plist>
