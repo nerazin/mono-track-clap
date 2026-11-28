@@ -12,7 +12,7 @@ enum {
    P_LPKEY, P_HPKEY, P_BEND, P_MTUNE, P_POLY, P_TRIG_SYN, P_TRIG_FILT, P_TRIG_LFO, P_LOCK_END,
    P_ASSIGN, NPARAM = P_ASSIGN + 12   /* KIT ASSIGN: VEL rows 1 and 2, then KEY rows 1 and 2, each PAGE DEST ADD */
 };
-enum { UI_STEPS = 64, UI_PAGE = 16, UI_LOCKS = 56 };
+enum { UI_STEPS = 64, UI_PAGE = 16, UI_LOCKS = 56, UI_VOICES = 6 };
 
 /* Written by the editor or the audio thread, read by the other: all relaxed. */
 typedef struct {
@@ -28,6 +28,11 @@ typedef struct {
    _Atomic int32_t lfo_inc[3];                /* the step it moves by, 384 samples apart */
    _Atomic int8_t lfo_wave[3], lfo_depth[3];  /* the wave played (0-10) and DPTH, LFO modulation included */
    _Atomic int8_t lfo_rnd[3][8];              /* RND's eight steps, as last played, in 2^-7 of full scale */
+   _Atomic int8_t lfo_mode[3];                /* TRIG as played: FREE TRIG HOLD ONE HALF */
+   /* where each voice's last LFO trig sampled its LFO, newest voice first: POLY's voices holding keys, else one */
+   _Atomic int8_t lfo_holds;                  /* how many voices below */
+   _Atomic int32_t lfo_hold_pos[3][UI_VOICES]; /* place in the cycle, -1 before the voice's first trig */
+   _Atomic int32_t lfo_hold_val[3][UI_VOICES]; /* the value held, full scale 0x800000 */
    /* the copied trig: main thread only, kept while the plug-in lives, not saved */
    int clip_full, clip_trig;
    int8_t clip_lock[UI_LOCKS];

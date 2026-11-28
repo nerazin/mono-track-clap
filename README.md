@@ -101,6 +101,15 @@ played. From about 4 cycles a second, where a moving dot starts to flicker, the
 dot fades out and the whole wave fades to pink; from 12 the graph is pink and
 holds still. With DPTH at 0 the graph is dimmed.
 
+In HOLD the LFO keeps running unheard, and it sends the value its last trig sampled.
+The graph shows that sample as a dot on the wave, where the LFO was when it was taken.
+The dot stays there until the next trig, at any speed. A faint ring runs on where the LFO is
+now, which is where the next trig will sample it. Before the first trig there is no dot, and
+the LFO sends 0. In POLY each voice holding a key has its own LFOs and its own sample,
+so there is a dot for each of them. The newest voice's dot is the largest and is drawn on top.
+The ring follows the newest voice. Once every key is up, only the newest voice's dot is
+left, though released voices keep sounding through their release.
+
 On a knob, the needle is the stored value. An amber arc goes to a lock sounding
 now, and a violet arc shows what the host's modulation adds.
 

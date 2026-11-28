@@ -19,6 +19,7 @@ typedef struct {
    int32_t pos, out, hold, inc, rem, gate, count;
    int32_t rnd_a, rnd_b, acc, delta, start;
    int seg, page, dest;     /* RND's last segment; the target, as of the last evaluation */
+   int32_t hold_pos;        /* not the OS's, for the editor: pos when hold was taken, -1 before the first trig */
 } MtLfo;
 
 /* One KIT ASSIGN row of the KEY VEL or KEY TRK tab: its target and what it adds. */
@@ -129,7 +130,7 @@ static void mt_lfo_step(MtHost *h, int32_t elapsed, int32_t tick) {
          }
          mt_lfo_evaluate(h, l, restart, inc);
       }
-      if (trig) { s->hold = s->out; s->count = 0x791d0000; s->gate = 1; }
+      if (trig) { s->hold = s->out; s->hold_pos = s->pos; s->count = 0x791d0000; s->gate = 1; }
    }
 }
 
@@ -204,6 +205,7 @@ static void mt_host_reset(MtHost *h) {
    for (int l = 0; l < 3; ++l) {
       h->lfo[l].rnd_a = 19741974;   /* the OS's power-on seed */
       h->lfo[l].rnd_b = 666;
+      h->lfo[l].hold_pos = -1;
    }
    for (int k = 0; k < MT_KNOBS; ++k) h->word[k < 8 ? W_SYN + k : k - 8] = h->knob[k];
    h->word[W_PMOD] = 64 << 16;

@@ -16,6 +16,8 @@
  *  - a press on an LFO tab slides across the tabs; turning PAGE redraws DEST's name
  *  - each LFO tab graphs its LFO: a moving dot redraws it, a still or very fast LFO does not,
  *    a moving dot trails a blue plume, and a very fast LFO's whole wave fades to pink
+ *  - in HOLD the dot stays where the LFO trig sampled it while the LFO runs on; POLY draws one
+ *    for each voice holding a key
  *  - SCALE: the speed cycles; a page button shows its page on the pads, and one past the
  *    end extends the pattern, filling each empty page it reaches as the unit does; LEN
  *    drags, and a shorter pattern sends the pads back to page 1; switching pages lets go
@@ -631,6 +633,63 @@ int main(int argc, char **argv) {
          clap_event_param_value_t e = {{sizeof e, 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0}, (clap_id)set[i].id, NULL, -1, -1, -1, -1, set[i].back};
          process(&e.header, 0, false);
       }
+      P->stop_processing(P);
+      P->deactivate(P);
+   }
+
+   /* HOLD: a dot where the trig sampled LFO2, which stays while the LFO runs on; POLY: one for each voice holding a key */
+   {
+      MtUi *ui = *(MtUi **)((char *)(__bridge void *)V + ivar_getOffset(class_getInstanceVariable([V class], "_ui")));
+      CHECK(P->activate(P, 44100, 1, 512) && P->start_processing(P), "activate");
+      enum { TRIG = P_LFO + 8 + 2, MULT = P_LFO + 8 + 4, SPD = P_LFO + 8 + 5, DPTH = P_LFO + 8 + 7 };
+      static const struct { int id; double v, back; } set[] = {{TRIG, 2, 0}, {SPD, 127, 64}, {MULT, 1, 0}, {DPTH, 100, 0}, {P_POLY, 1, 0}};
+      void (^param)(int, int) = ^(int i, int back) {
+         clap_event_param_value_t e = {{sizeof e, 0, CLAP_CORE_EVENT_SPACE_ID, CLAP_EVENT_PARAM_VALUE, 0}, (clap_id)set[i].id, NULL, -1, -1, -1, -1, back ? set[i].back : set[i].v};
+         process(&e.header, 0, false);
+      };
+      void (^note)(int, int) = ^(int key, int on) {
+         clap_event_note_t n = {{sizeof n, 0, CLAP_CORE_EVENT_SPACE_ID, on ? CLAP_EVENT_NOTE_ON : CLAP_EVENT_NOTE_OFF, 0}, -1, 0, 0, (int16_t)key, 1.0};
+         process(&n.header, 0, false);
+      };
+      void (^run)(int) = ^(int n) { for (int i = 0; i < n; ++i) process(NULL, 0, false); pump(); };
+      int32_t (^hpos)(int) = ^(int i) { return atomic_load(&ui->lfo_hold_pos[1][i]); };
+      BOOL (^lit)(int) = ^BOOL(int i) {   /* the held value's dot: VALUE, brighter than the wave's TEXT */
+         int c[3];
+         pixel(976 + 76 + 75 - 31 + fmin(hpos(i) / 8388608.0, 0.9999) * 26, 30 - atomic_load(&ui->lfo_hold_val[1][i]) / 8388608.0 * 6.5, c);
+         return c[0] > 230 && c[1] > 230 && c[2] > 230;
+      };
+      for (int i = 0; i < 4; ++i) param(i, 0);
+      run(20);
+      note(60, 1);
+      run(4);
+      const int32_t held = hpos(0);
+      CHECK(atomic_load(&ui->lfo_mode[1]) == 2 && atomic_load(&ui->lfo_holds) == 1 && held >= 0, "LFO2 in HOLD after a note: mode %d, %d held at %d",
+            atomic_load(&ui->lfo_mode[1]), atomic_load(&ui->lfo_holds), held);
+      const int32_t ran = atomic_load(&ui->lfo_pos[1]);
+      run(60);
+      CHECK(hpos(0) == held && atomic_load(&ui->lfo_pos[1]) != ran, "HOLD: the sample stays (%d, was %d), the LFO runs on", hpos(0), held);
+      CHECK(lit(0), "HOLD: no dot where the trig sampled LFO2");
+      const double x = atomic_load(&ui->lfo_pos[1]) / 8388608.0;   /* where it runs now, on TRI: a ring there, not a dot */
+      int c[3];
+      pixel(976 + 76 + 75 - 31 + x * 26, 30 - (x <= 0.25 ? 4 * x : x > 0.75 ? 4 * x - 4 : 2 - 4 * x) * 6.5, c);
+      CHECK(c[0] <= 230, "HOLD: a dot where the LFO runs: %d %d %d", c[0], c[1], c[2]);
+      shot(dir, "17_lfo_hold");
+      note(60, 0);
+      param(4, 0);   /* POLY: two voices, trigged a third of a cycle apart */
+      run(4);
+      note(60, 1);
+      run(60);
+      note(64, 1);
+      run(4);
+      CHECK(atomic_load(&ui->lfo_holds) == 2 && hpos(0) >= 0 && hpos(1) >= 0 && abs(hpos(0) - hpos(1)) > 0x200000,
+            "POLY: %d held, at %d and %d", atomic_load(&ui->lfo_holds), hpos(0), hpos(1));
+      CHECK(lit(0) && lit(1), "POLY: the dots %d %d", lit(0), lit(1));
+      shot(dir, "18_lfo_hold_poly");
+      note(64, 0);
+      run(4);
+      CHECK(atomic_load(&ui->lfo_holds) == 1, "POLY: keys up, %d held", atomic_load(&ui->lfo_holds));
+      note(60, 0);
+      for (int i = 4; i >= 0; --i) param(i, 1);
       P->stop_processing(P);
       P->deactivate(P);
    }

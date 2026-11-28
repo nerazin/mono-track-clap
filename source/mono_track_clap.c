@@ -86,7 +86,7 @@ static const char *const features[MT_MACHINES][4] = {
 #undef FX
 };
 #define DESCRIPTOR(m) { .clap_version = CLAP_VERSION_INIT, .id = machines[m].id, .name = machines[m].name, \
-   .vendor = "Independent DSP", .url = "", .manual_url = "", .support_url = "", .version = "0.8.1", \
+   .vendor = "Independent DSP", .url = "", .manual_url = "", .support_url = "", .version = "0.8.2", \
    .description = MT_FX(m) ? "A whole Monomachine track around an FX machine: machine, EQ, filter, AMP, SRR, delay, LFOs, ported from its code" \
                            : "A whole Monomachine track: machine, EQ, filter, AMP, SRR, delay, LFOs, ported from its code", .features = features[m] }
 static const clap_plugin_descriptor_t descriptors[MT_MACHINES] = {
@@ -299,9 +299,19 @@ static int32_t lock_word(int id, double v) {
    return id >= P_LFO ? lfo_raw((id - P_LFO) % 8, v) * 65536 : (int32_t)lrint(clamp(v, 0, 127) * 65536.0);
 }
 
-/* What the editor draws by each LFO tab. */
-static void publish_lfos(Plugin *s, const MtHost *h) {
+/* What the editor draws by each LFO tab: the newest voice's LFOs, and where each voice's held value was sampled. */
+static void publish_lfos(Plugin *s) {
+   _Static_assert(UI_VOICES == MT_VOICES, "one held value per voice");
+   const MtHost *h = &s->voice[s->poly ? s->alloc.voice[0] : 0].cpu;
+   const int holds = s->poly && s->alloc.count ? s->alloc.count : 1;
+   atomic_store_explicit(&s->ui.lfo_holds, (int8_t)holds, memory_order_relaxed);
    for (int l = 0; l < 3; ++l) {
+      atomic_store_explicit(&s->ui.lfo_mode[l], (int8_t)mt_list(h->shadow[l][L_TRIG], 5), memory_order_relaxed);
+      for (int i = 0; i < holds; ++i) {
+         const MtLfo *o = &s->voice[s->poly ? s->alloc.voice[i] : 0].cpu.lfo[l];
+         atomic_store_explicit(&s->ui.lfo_hold_pos[l][i], o->hold_pos, memory_order_relaxed);
+         atomic_store_explicit(&s->ui.lfo_hold_val[l][i], o->hold, memory_order_relaxed);
+      }
       const MtLfo *o = &h->lfo[l];
       const int wave = mt_list(h->shadow[l][L_WAVE], 11), depth = mt_hi16(h->shadow[l][L_DPTH]);
       atomic_store_explicit(&s->ui.lfo_pos[l], o->pos, memory_order_relaxed);
@@ -365,7 +375,6 @@ static void control_frame(Plugin *s, Voice *v) {
       }
    if (lfos) mt_host_locked_lfos(h, any ? mod : NULL, lfos);
    mt_host_frame(h, any ? mod : NULL);
-   if (v == &s->voice[s->poly ? s->alloc.voice[0] : 0]) publish_lfos(s, h);
    h->word[W_NOTE] = h->word[W_FTRIG] = 0;
    if (start && !v->quick) machine_start(s, v);
    v->quick = false;
@@ -419,6 +428,7 @@ static void native_frame(Plugin *s, const double in[4], double out[2]) {
 #endif
          v->cpu.block[W_NOTE] = v->cpu.block[W_FTRIG] = 0;   /* one-shots: only the frame's first block carries them */
       }
+      if (frame_start) publish_lfos(s);
       if (frame_start && s->queued) { memset(s->queue, QUEUE_NONE, sizeof s->queue); s->queued = false; }
       for (int c = 0; c < 2; ++c)
          for (int i = 0; i < MT_FRAMES; ++i) {
@@ -1348,7 +1358,10 @@ static const clap_plugin_t *factory_create(const clap_plugin_factory_t *f, const
       atomic_init(&s->ui.lfo_wave[l], 0);
       atomic_init(&s->ui.lfo_depth[l], 0);
       for (int k = 0; k < 8; ++k) atomic_init(&s->ui.lfo_rnd[l][k], 0);
+      atomic_init(&s->ui.lfo_mode[l], 0);
+      for (int i = 0; i < UI_VOICES; ++i) { atomic_init(&s->ui.lfo_hold_pos[l][i], -1); atomic_init(&s->ui.lfo_hold_val[l][i], 0); }
    }
+   atomic_init(&s->ui.lfo_holds, 1);
    for (int t = 0; t < MT_STEPS; ++t) atomic_init(&s->ui.notes[t], 0);
    memset(s->queue, QUEUE_NONE, sizeof s->queue);
    for (int i = 0; i < NPARAM; ++i) { atomic_init(&s->ui_flag[i], 0); atomic_init(&s->ui.mod[i], 0.f); }

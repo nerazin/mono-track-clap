@@ -30,7 +30,7 @@
 #endif
 
 /* Plug-ins share one host process, and Objective-C classes one namespace: the version keeps builds apart. */
-#define MTEditorView MonoTrackEditorView_0_8_1
+#define MTEditorView MonoTrackEditorView_0_8_2
 
 enum { C_TITLE, C_KNOB, C_TAB, C_SLIDER, C_SWITCH, C_KEYS, C_PAD, C_CLEAR, C_COPY, C_PASTE, C_LEN, C_SPEED, C_PAGE, C_SETUP, C_CLOSE, C_MAX = 160 };
 /* Controls of the setup windows have these sections: KIT ASSIGN's KEY VEL and KEY TRK tabs. */
@@ -781,11 +781,22 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
       h = mix(mix(h, floor(atomic_load_explicit(&_ui->lfo_pos[l], memory_order_relaxed) / 8388608.0 * 104)), floor([self lfoTrail:l] * 16));
    if (wave == 10)
       for (int k = 0; k < 8; ++k) h = mix(h, _rnd[l][k]);
+   if ([self lfoHolds:l]) {
+      const int n = atomic_load_explicit(&_ui->lfo_holds, memory_order_relaxed);
+      h = mix(h, n);
+      for (int i = 0; i < n; ++i)
+         h = mix(mix(h, floor(atomic_load_explicit(&_ui->lfo_hold_pos[l][i], memory_order_relaxed) / 8388608.0 * 104)),
+                 atomic_load_explicit(&_ui->lfo_hold_val[l][i], memory_order_relaxed) >> 16);
+   }
    return h;
 }
+/* HOLD: the LFO runs on unheard, and what it sends is what its last trig sampled. */
+- (BOOL)lfoHolds:(int)l { return atomic_load_explicit(&_ui->lfo_mode[l], memory_order_relaxed) == 2; }
 /* The wave over one cycle, drawn from its shape so it stays clean at any speed, on a zero
  * line, with a dot where the LFO is now trailing a comet's plume. Fast, the dot and plume
- * fade out while the wave turns pink and glows. */
+ * fade out while the wave turns pink and glows. In HOLD the dot stays where the trig sampled
+ * the LFO, at any speed, and a faint ring runs on where the next trig would sample it; POLY
+ * has a dot for each voice holding a key, the older ones smaller, the newest on top. */
 - (void)drawLfo:(int)l in:(NSRect)g on:(BOOL)on {
    CGContextRef ctx = NSGraphicsContext.currentContext.CGContext;
    const int wave = atomic_load_explicit(&_ui->lfo_wave[l], memory_order_relaxed);
@@ -819,7 +830,28 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
    CGContextSetStrokeColorWithColor(ctx, [C(on ? VALUE : TEXT, 1) blendedColorWithFraction:fast ofColor:C(FAST, 1)].CGColor);
    CGContextStrokePath(ctx);
    CGPathRelease(path);
-   if (fast < 1) {
+   const BOOL hold = [self lfoHolds:l];
+   if (fast < 1 && hold) {
+      const CGPoint p = at(fmin(atomic_load_explicit(&_ui->lfo_pos[l], memory_order_relaxed) / 8388608.0, 0.9999));
+      CGContextSetAlpha(ctx, alpha * (1 - fast));
+      CGContextSetLineWidth(ctx, 1);
+      CGContextSetStrokeColorWithColor(ctx, C(MUTED, 1).CGColor);
+      CGContextStrokeEllipseInRect(ctx, CGRectMake(p.x - 2.5, p.y - 2.5, 5, 5));
+   }
+   if (hold) {
+      CGContextSetAlpha(ctx, alpha);
+      for (int i = atomic_load_explicit(&_ui->lfo_holds, memory_order_relaxed) - 1; i >= 0; --i) {
+         const int32_t pos = atomic_load_explicit(&_ui->lfo_hold_pos[l][i], memory_order_relaxed);
+         if (pos < 0) continue;   /* no trig yet: it sends 0 */
+         const double r = i ? 1.75 : 2.5, y = atomic_load_explicit(&_ui->lfo_hold_val[l][i], memory_order_relaxed) / 8388608.0;
+         const CGPoint p = CGPointMake(x0 + fmin(pos / 8388608.0, 0.9999) * w, mid - y * half);
+         CGContextSetFillColorWithColor(ctx, C(on ? PANEL : BG, 1).CGColor);
+         CGContextFillEllipseInRect(ctx, CGRectMake(p.x - r - 1.25, p.y - r - 1.25, 2 * r + 2.5, 2 * r + 2.5));
+         CGContextSetFillColorWithColor(ctx, C(VALUE, 1).CGColor);
+         CGContextFillEllipseInRect(ctx, CGRectMake(p.x - r, p.y - r, 2 * r, 2 * r));
+      }
+   }
+   if (fast < 1 && !hold) {
       const double x = fmin(atomic_load_explicit(&_ui->lfo_pos[l], memory_order_relaxed) / 8388608.0, 0.9999);
       const double trail = [self lfoTrail:l], tail = fmin(fmax(0.1 + [self lfoHz:l] * 0.12, 0.1), 0.45);
       const CGPoint p = at(x);
