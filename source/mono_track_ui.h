@@ -45,16 +45,19 @@ void mt_ui_end(const clap_plugin_t *p, int id);
 void mt_ui_pattern_changed(const clap_plugin_t *p, const char *what);   /* one undo step, named, unless a change is open */
 void mt_ui_change_begin(const clap_plugin_t *p);   /* the edits until mt_ui_change_end are one undo step */
 void mt_ui_change_end(const clap_plugin_t *p);
+void mt_ui_resized(const clap_plugin_t *p);   /* the editor's new size has settled: the host should save it */
 void mt_ui_set_length(const clap_plugin_t *p, int length);   /* fills pages it reaches, as the unit does */
 int mt_ui_bipolar(const clap_plugin_t *p, int id);
 int mt_ui_unused(const clap_plugin_t *p, int id);
 
 /* The editor (mono_track_gui.m). */
 enum { MT_GUI_W = 1368, MT_GUI_H = 388 };
+uint32_t mt_gui_default_width(void);   /* what the user set for new instances, or MT_GUI_W; reads the settings file */
 void *mt_gui_create(const clap_plugin_t *p, MtUi *ui);
 void mt_gui_destroy(void *gui);
 void mt_gui_set_parent(void *gui, void *ns_view);
 void mt_gui_set_size(void *gui, uint32_t w, uint32_t h);
+void mt_gui_resized(void *gui);   /* the host gave it a new size */
 void mt_gui_show(void *gui);
 void mt_gui_hide(void *gui);
 

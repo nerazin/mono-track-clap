@@ -28,6 +28,9 @@
  *    types the lock; a double-click elsewhere on the knob still resets it
  *  - an FX machine's editor (PHASER): its unused knob takes no typing, its INP
  *    reads 0.0 at 64 and takes a typed -6
+ *  - the size: saved in the state but not in a preset, not moved by a load once the editor was
+ *    opened, marked dirty once when a resize has paused and never by opening; SET AS DEFAULT SIZE
+ *    makes new instances and old states open at it, and a bad settings file is the design size
  *  - with no font, or an exception while drawing, the editor draws on and logs it
  *  - a trig is one named step in the host's undo, a lock drag one step, and no change stays open */
 #import <Cocoa/Cocoa.h>
@@ -37,10 +40,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <clap/ext/draft/undo.h>
+#include <clap/ext/state-context.h>
 #include "../source/mono_track_ui.h"
 
 #define CHECK(c, ...) do { if (!(c)) { printf("FAIL line %d: ", __LINE__); printf(__VA_ARGS__); puts(""); exit(1); } } while (0)
-enum { PAT = 8 + 8 * NPARAM, LOCKS = PAT + 10, STATE = LOCKS + UI_STEPS * UI_LOCKS };
+enum { PAT = 8 + 8 * NPARAM, LOCKS = PAT + 10, WIDTH = LOCKS + UI_STEPS * UI_LOCKS, STATE = WIDTH + 2 };
 
 static int flushes, begins, ends, values;
 static void host_flush(const clap_host_params_t *x);
@@ -63,9 +67,13 @@ static void u_made(const clap_host_t *h, const char *name, const void *d, size_t
 static void u_redo(const clap_host_t *h) { (void)h; }
 static void u_sub(const clap_host_t *h, bool b) { (void)h; (void)b; }
 static const clap_host_undo_t host_undo = {u_begin, u_cancel, u_made, u_redo, u_redo, u_sub};
+static int dirties;
+static void h_dirty(const clap_host_t *h) { (void)h; ++dirties; }
+static const clap_host_state_t host_state = {h_dirty};
 static const void *host_ext(const clap_host_t *h, const char *id) {
    (void)h;
-   return !strcmp(id, CLAP_EXT_PARAMS) ? (const void *)&host_params : !strcmp(id, CLAP_EXT_UNDO) ? (const void *)&host_undo : NULL;
+   return !strcmp(id, CLAP_EXT_PARAMS) ? (const void *)&host_params : !strcmp(id, CLAP_EXT_UNDO) ? (const void *)&host_undo
+        : !strcmp(id, CLAP_EXT_STATE) ? (const void *)&host_state : NULL;
 }
 static void host_cb(const clap_host_t *h) { (void)h; }
 static const clap_host_t host = {CLAP_VERSION_INIT, NULL, "test", "", "", "1", host_ext, host_cb, host_cb, host_cb};
@@ -146,6 +154,7 @@ static Buf save(void) {
 static uint64_t trigs(void) { Buf b = save(); uint64_t t = 0; for (int i = 0; i < 8; ++i) t |= (uint64_t)b.d[PAT + i] << (8 * i); return t; }
 static int lockv(int step, int id) { Buf b = save(); return (int8_t)b.d[LOCKS + step * UI_LOCKS + id]; }
 static int length(void) { return save().d[PAT + 8]; }
+static int width(void) { Buf b = save(); return b.d[WIDTH] | b.d[WIDTH + 1] << 8; }
 static int speed(void) { return save().d[PAT + 9]; }
 static double val(int id) { double v; PA->get_value(P, (clap_id)id, &v); return v; }
 static void shot(const char *dir, const char *name) {
@@ -308,6 +317,7 @@ int main(int argc, char **argv) {
    CHECK(gui->create(P, CLAP_WINDOW_API_COCOA, false), "create gui");
    uint32_t gw, gh;
    CHECK(gui->get_size(P, &gw, &gh) && gw == MT_GUI_W && gh == MT_GUI_H, "size");
+   CHECK(width() == MT_GUI_W, "an opened editor saves its size: %d", width());
    W = [[NSWindow alloc] initWithContentRect:NSMakeRect(-6000, -6000, gw, gh) styleMask:NSWindowStyleMaskTitled backing:NSBackingStoreBuffered defer:NO];
    W.releasedWhenClosed = NO;
    clap_window_t cw = {CLAP_WINDOW_API_COCOA, {(__bridge void *)W.contentView}};
@@ -1122,7 +1132,93 @@ int main(int argc, char **argv) {
    CHECK(gui->can_resize(P) && gui->adjust_size(P, &aw, &ah), "adjust");
    CHECK(aw >= 820 && abs((int)ah - (int)(aw * MT_GUI_H / MT_GUI_W)) <= 1, "aspect %u %u", aw, ah);
    CHECK(gui->set_size(P, aw, ah), "set_size");
-   CHECK(V.bounds.size.width == MT_GUI_W, "bounds");
+   CHECK(fabs(V.bounds.size.width - MT_GUI_W) < 1e-6 && fabs(V.bounds.size.height - MT_GUI_H) < 1e-6, "bounds %.17g x %.17g", V.bounds.size.width, V.bounds.size.height);
+
+   for (uint32_t i = 600; i < 2900; ++i) {
+      uint32_t w1 = i, h1 = 0, w2, h2;
+      gui->adjust_size(P, &w1, &h1);
+      w2 = w1; h2 = h1;
+      gui->adjust_size(P, &w2, &h2);
+      CHECK(w1 == w2 && h1 == h2, "adjusting %ux%u again: %ux%u", w1, h1, w2, h2);
+   }
+
+   /* a resize is saved, and the host is told once it has paused */
+   const int steps0 = undoSteps;
+   CHECK(!dirties, "dirty before any resize (%d)", dirties);
+   CHECK(gui->set_size(P, 1500, 425) && gui->set_size(P, 1710, 485), "set_size");
+   pump();
+   CHECK(!dirties, "dirty in the middle of a resize");
+   [NSThread sleepForTimeInterval:0.55];
+   pump(); pump();
+   CHECK(dirties == 1 && width() == 1710, "dirty %d, width %d", dirties, width());
+   CHECK(gui->set_size(P, 1710, 485), "the same size again");
+   [NSThread sleepForTimeInterval:0.55];
+   pump();
+   CHECK(dirties == 1 && undoSteps == steps0, "an unchanged size is an edit");
+   /* closing does not lose a resize that has not paused yet; hosts get the size the editor can have */
+   CHECK(gui->set_size(P, 1600, 454) && gui->hide(P) && dirties == 2, "hide in a resize: dirty %d", dirties);
+   CHECK(gui->show(P) && gui->set_size(P, 1710, 485) && gui->hide(P) && gui->show(P) && dirties == 3, "back");
+
+   /* SET 125% AS DEFAULT SIZE: refused while there is nowhere to write it */
+   const CGFloat sizeX = 240, sizeY = 7;
+   char settings[1200], line[64] = "";
+   snprintf(settings, sizeof settings, "%s/Library/Application Support/Mono Track.settings", home);
+   click(sizeX, sizeY);
+   CHECK(access(settings, F_OK), "a settings file with no folder");
+   snprintf(logs, sizeof logs, "mkdir -p '%s/Library/Application Support'", home);
+   CHECK(!system(logs), "the folder");
+   const NSRect strip = NSMakeRect(176, 0, 150, 14);
+   CHECK(brightIn(strip) > 20, "SET 125%% AS DEFAULT SIZE does not show");
+   shot(dir, "17_size_offered");
+   ndirty = 0;
+   click(sizeX, sizeY);
+   CHECK(redrawn(sizeX, sizeY) && !brightIn(strip), "the offer did not go away");
+   shot(dir, "18_size_default");
+   FILE *sf = fopen(settings, "r");
+   CHECK(sf && fgets(line, sizeof line, sf) && !strcmp(line, "editor_width 1710\n"), "settings: %s", line);
+   fclose(sf);
+   CHECK(dirties == 3, "the default size marked the project");
+   /* an instance that has no size opens at it; one that has keeps its own */
+   {
+      const clap_plugin_t *q = f->create_plugin(f, &host, P->desc->id);
+      const clap_plugin_state_t *sq = q->get_extension(q, CLAP_EXT_STATE);
+      const clap_plugin_state_context_t *cq = q->get_extension(q, CLAP_EXT_STATE_CONTEXT);
+      uint32_t qw = 0, qh = 0;
+      Buf b = {0};
+      clap_ostream_t os = {&b, w};
+      clap_istream_t is = {&b, r};
+      CHECK(q->init(q) && sq->save(q, &os) && !b.d[WIDTH] && !b.d[WIDTH + 1], "a never opened instance has a size");
+      CHECK(gui->create(q, CLAP_WINDOW_API_COCOA, false) && gui->get_size(q, &qw, &qh) && qw == 1710 && qh == 485, "a new instance opens at %u x %u", qw, qh);
+      gui->destroy(q);
+      /* once opened, no load moves it */
+      CHECK(gui->set_size(P, 1368, 388), "100%%");
+      b = save(); b.pos = 0;
+      CHECK(sq->load(q, &is) && gui->create(q, CLAP_WINDOW_API_COCOA, false) && gui->get_size(q, &qw, &qh) && qw == 1710, "a load moved an opened editor: %u", qw);
+      gui->destroy(q);
+      q->destroy(q);
+      /* a project's state brings its size; a preset's, or one saved before 0.8.4, does not */
+      for (int k = 0; k < 4; ++k) {
+         q = f->create_plugin(f, &host, P->desc->id);
+         cq = q->get_extension(q, CLAP_EXT_STATE_CONTEXT);
+         sq = q->get_extension(q, CLAP_EXT_STATE);
+         b = save(); b.pos = 0;
+         if (k == 3) { b.d[7] = 5; b.n -= 2; }
+         CHECK(q->init(q) && cq && (k == 0 ? cq->load(q, &is, CLAP_STATE_CONTEXT_FOR_PRESET) : k == 1 ? cq->load(q, &is, CLAP_STATE_CONTEXT_FOR_PROJECT) : sq->load(q, &is)), "load %d", k);
+         CHECK(gui->create(q, CLAP_WINDOW_API_COCOA, false) && gui->get_size(q, &qw, &qh) && qw == (k == 0 || k == 3 ? 1710 : 1368), "load %d opens at %u", k, qw);
+         gui->destroy(q);
+         q->destroy(q);
+      }
+      /* a settings file that cannot be read as one */
+      const char *const bad[3] = {"", "editor_width -4\n", "nonsense"};
+      for (int k = 0; k < 4; ++k) {
+         if (k < 3) { sf = fopen(settings, "w"); CHECK(sf && fputs(bad[k], sf) >= 0 && !fclose(sf), "write"); }
+         else unlink(settings);
+         q = f->create_plugin(f, &host, P->desc->id);
+         CHECK(q->init(q) && gui->create(q, CLAP_WINDOW_API_COCOA, false) && gui->get_size(q, &qw, &qh) && qw == MT_GUI_W && qh == MT_GUI_H, "bad settings %d: %u", k, qw);
+         gui->destroy(q);
+         q->destroy(q);
+      }
+   }
 
    gui->destroy(P);
    CHECK(W.contentView.subviews.count == 0, "removed");

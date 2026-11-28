@@ -82,6 +82,14 @@ The top-left corner shows, faintly, the name, the version and the commit the
 build came from, such as `Mono Track 0.8.0 (ff94ab5)`. A `+` after the commit marks a build with
 uncommitted changes.
 
+The window resizes from 0.6x to 2x, keeping its shape, and the project saves each instance's
+size. Beside the version, `SET 125% AS DEFAULT SIZE` appears while the window's size differs from
+the default; click it, and new instances of every machine open at this size. So do projects saved
+before 0.8.4 and instances whose editor was never opened. The default is kept in
+`~/Library/Application Support/Mono Track.settings`; delete the file to go back to 100%.
+Presets hold no size, where the host says that it is loading one, and undo does not move the window. A project saved by
+0.8.4 does not load in an older version.
+
 The editor runs in the host's process, so it never lets an error out of its drawing: an exception
 there would close the host with every plug-in in it. A text it cannot draw (the system returned no font
 or colour) is skipped for that redraw. Both cases are written to `~/Library/Logs/Mono Track.log`,
@@ -411,7 +419,7 @@ the module ASSIGN, but on no remote-control page.
   the editor test, not against the firmware. The firmware checks cover the rule
   it follows and what a fill copies.
 - The FX plug-ins, the 64-step pattern, the VEL and KEY SETUP windows, typed
-  values and KEYBOARD CAPTURE on by default have not been tried by hand in Bitwig yet. Typing needs the host to pass keys to the
+  values, KEYBOARD CAPTURE on by default and the saved and default window sizes have not been tried by hand in Bitwig yet. Typing needs the host to pass keys to the
   plug-in's window; the editor test types through AppKit's own field editor.
 - Velocity and key were not compared with the unit's own keyboard, whose
   velocity curve (VELOCITY CURVE in the global settings) comes before them.
@@ -446,14 +454,14 @@ xcrun clang -std=c11 -O1 -fobjc-arc -w -I vendor/clap/include tests/gui_test.m -
 
 `test_core` needs no firmware. `clap_test` loads the bundle and checks its
 pages, parameters, state (including states saved by 0.1.0, 0.2.0 and 0.4, which load as 16 steps at 1X, and
-0.5, which load KIT ASSIGN as a cleared kit), each section's effect on the sound, velocity and key through KIT ASSIGN, POLY, the MIDI TRIG switches, trigs and locks.
+0.5, which load KIT ASSIGN as a cleared kit, and by 0.6 to 0.8.3, which hold no window size), each section's effect on the sound, velocity and key through KIT ASSIGN, POLY, the MIDI TRIG switches, trigs and locks.
 It also checks that every value's text, typed back, reads the same: on all fifteen
 machines, every parameter at 2,033 values, DEST under every PAGE; each machine's state
 round trip; and the effects: their ports, defaults and latency, that each passes its input
 with no note at 44.1 and 48 kHz, INP at 0, a note reopening a closed AMP, RINGMOD's
 sidechain and POLY. `gui_test` opens the
-editor off-screen and drives it with mouse and key events, typed values included, and
-opens PHASER's editor. All three also pass
+editor off-screen and drives it with mouse and key events, typed values included, resizes it, sets the default
+size (in a temporary home folder) and opens PHASER's editor. All three also pass
 under AddressSanitizer and UBSan and as an Intel build under Rosetta, and the
 bundle passes `clap-trap` at 44.1, 48 and 96 kHz.
 

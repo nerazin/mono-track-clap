@@ -20,6 +20,7 @@
  * SPDX-License-Identifier: GPL-3.0-only */
 #include <clap/clap.h>
 #include <clap/ext/draft/undo.h>
+#include <clap/ext/state-context.h>
 #include <math.h>
 #include <stdatomic.h>
 #include <stdbool.h>
@@ -86,7 +87,7 @@ static const char *const features[MT_MACHINES][4] = {
 #undef FX
 };
 #define DESCRIPTOR(m) { .clap_version = CLAP_VERSION_INIT, .id = machines[m].id, .name = machines[m].name, \
-   .vendor = "Independent DSP", .url = "", .manual_url = "", .support_url = "", .version = "0.8.3", \
+   .vendor = "Independent DSP", .url = "", .manual_url = "", .support_url = "", .version = "0.8.4", \
    .description = MT_FX(m) ? "A whole Monomachine track around an FX machine: machine, EQ, filter, AMP, SRR, delay, LFOs, ported from its code" \
                            : "A whole Monomachine track: machine, EQ, filter, AMP, SRR, delay, LFOs, ported from its code", .features = features[m] }
 static const clap_plugin_descriptor_t descriptors[MT_MACHINES] = {
@@ -224,7 +225,8 @@ typedef struct {
    char undo_name[64];                /* the open change's last edit */
    MtUi ui;
    void *gui;
-   uint32_t gui_w, gui_h;
+   uint32_t gui_w, gui_h;             /* 0 until the editor is sized: it then opens at the default size */
+   bool gui_opened;                   /* a state loaded from now on leaves the size alone */
    double mod[NPARAM];
    /* audio thread */
    bool active, direct, poly;
@@ -1051,15 +1053,24 @@ static const clap_plugin_params_t params = {params_count, params_info, params_ge
 /* Version 1 (0.1.0) held the first 61 parameters; version 2 (0.2.0) 65, then a
  * 16-step pattern: the trig mask and every step's locks; version 3 adds NOTE ENDS
  * LOCK. Version 4 (0.5.0) holds 64 steps: the trig mask (8 bytes), length, speed
- * and every step's locks. Version 5 (0.6.0) adds KIT ASSIGN's 12 parameters. */
+ * and every step's locks. Version 5 (0.6.0) adds KIT ASSIGN's 12 parameters.
+ * Version 6 (0.8.4) ends with the editor's width (2 bytes), 0 for the default. */
 #define STATE_V1 (8 + 8 * 61)
 #define STATE_16(n) (8 + 8 * (n) + 2 + 16 * MT_LOCKS)
 #define STATE_64(n) (8 + 8 * (n) + 10 + MT_STEPS * MT_LOCKS)
-static bool state_save(const clap_plugin_t *p, const clap_ostream_t *st) {
+#define STATE_V6 (STATE_64(NPARAM) + 2)
+/* The closest size the editor can have: its own aspect, 0.6x to 2x. */
+static void gui_fit(uint32_t *w, uint32_t *h) {
+   const double x = clamp(fmax(*w, (double)*h * MT_GUI_W / MT_GUI_H), MT_GUI_W * 0.6, MT_GUI_W * 2.0);
+   *w = (uint32_t)lround(x);
+   *h = *w * MT_GUI_H / MT_GUI_W;   /* rounded down, so a fitted size fits: up, a saved width would grow at each reopening */
+}
+/* A preset holds no editor size: what is loaded from one opens at the default. */
+static bool state_save_for(const clap_plugin_t *p, const clap_ostream_t *st, uint32_t context) {
    const Plugin *s = p->plugin_data;
-   uint8_t buf[STATE_64(NPARAM)] = {0};
+   uint8_t buf[STATE_V6] = {0};
    memcpy(buf, machines[s->machine].magic, 4);
-   buf[7] = 5;
+   buf[7] = 6;
    for (int i = 0; i < NPARAM; ++i)
       for (int b = 0; b < 8; ++b) buf[8 + 8 * i + b] = (uint8_t)(to_bits(value(s, i)) >> (8 * b));
    uint8_t *pat = buf + 8 + 8 * NPARAM;
@@ -1070,6 +1081,12 @@ static bool state_save(const clap_plugin_t *p, const clap_ostream_t *st) {
    for (int t = 0; t < MT_STEPS; ++t)
       for (int i = 0; i < MT_LOCKS; ++i)
          pat[10 + t * MT_LOCKS + i] = (uint8_t)atomic_load_explicit(&s->ui.lock[t][i], memory_order_relaxed);
+   if (s->gui_w && context != CLAP_STATE_CONTEXT_FOR_PRESET) {
+      uint32_t w = s->gui_w, h = s->gui_h;
+      gui_fit(&w, &h);
+      buf[STATE_V6 - 2] = (uint8_t)w;
+      buf[STATE_V6 - 1] = (uint8_t)(w >> 8);
+   }
    for (uint64_t done = 0; done < sizeof buf;) {
       const int64_t n = st && st->write ? st->write(st, buf + done, sizeof buf - done) : -1;
       if (n <= 0) return false;
@@ -1077,9 +1094,9 @@ static bool state_save(const clap_plugin_t *p, const clap_ostream_t *st) {
    }
    return true;
 }
-static bool state_load(const clap_plugin_t *p, const clap_istream_t *st) {
+static bool state_load_for(const clap_plugin_t *p, const clap_istream_t *st, uint32_t context) {
    Plugin *s = p->plugin_data;
-   uint8_t buf[STATE_64(NPARAM)];
+   uint8_t buf[STATE_V6];
    uint64_t got = 0;
    while (got < sizeof buf) {
       const int64_t n = st && st->read ? st->read(st, buf + got, sizeof buf - got) : -1;
@@ -1089,9 +1106,9 @@ static bool state_load(const clap_plugin_t *p, const clap_istream_t *st) {
    }
    if (got < 8 || memcmp(buf, machines[s->machine].magic, 4) || buf[4] || buf[5] || buf[6]) return false;
    const int version = buf[7];
-   if (version < 1 || version > 5) return false;
+   if (version < 1 || version > 6) return false;
    const int count = version == 1 ? 61 : version == 2 ? 65 : version < 5 ? P_ASSIGN : NPARAM;
-   if (got != (uint64_t)(version == 1 ? STATE_V1 : version < 4 ? STATE_16(count) : STATE_64(count))) return false;
+   if (got != (uint64_t)(version == 1 ? STATE_V1 : version < 4 ? STATE_16(count) : version < 6 ? STATE_64(count) : STATE_V6)) return false;
    double v[NPARAM];
    for (int i = 0; i < NPARAM; ++i) {
       if (i >= count) { v[i] = def_of(s->machine, i); continue; }
@@ -1115,6 +1132,11 @@ static bool state_load(const clap_plugin_t *p, const clap_istream_t *st) {
             if (x < -1 || x > hi_of(i)) return false;
          }
    }
+   if (!s->gui_opened && context != CLAP_STATE_CONTEXT_FOR_PRESET) {   /* once opened, undo does not move the window */
+      s->gui_w = version >= 6 ? buf[STATE_V6 - 2] | (uint32_t)buf[STATE_V6 - 1] << 8 : 0;
+      s->gui_h = 0;
+      if (s->gui_w) gui_fit(&s->gui_w, &s->gui_h);
+   }
    for (int i = 0; i < NPARAM; ++i) set_value(s, i, v[i]);
    atomic_store_explicit(&s->ui.trig, trig, memory_order_relaxed);
    atomic_store_explicit(&s->ui.length, (int8_t)length, memory_order_relaxed);
@@ -1127,7 +1149,10 @@ static bool state_load(const clap_plugin_t *p, const clap_istream_t *st) {
    if (hp && hp->rescan) hp->rescan(s->host, CLAP_PARAM_RESCAN_VALUES | CLAP_PARAM_RESCAN_TEXT);
    return true;
 }
+static bool state_save(const clap_plugin_t *p, const clap_ostream_t *st) { return state_save_for(p, st, CLAP_STATE_CONTEXT_FOR_PROJECT); }
+static bool state_load(const clap_plugin_t *p, const clap_istream_t *st) { return state_load_for(p, st, CLAP_STATE_CONTEXT_FOR_PROJECT); }
 static const clap_plugin_state_t state = {state_save, state_load};
+static const clap_plugin_state_context_t state_context = {state_save_for, state_load_for};
 
 /* The hardware's seven data pages, then the track's own settings. */
 static uint32_t remote_count(const clap_plugin_t *p) { (void)p; return 8; }
@@ -1168,6 +1193,7 @@ static const void *plug_extension(const clap_plugin_t *p, const char *id) {
    if (!strcmp(id, CLAP_EXT_AUDIO_PORTS)) return &ports;
    if (!strcmp(id, CLAP_EXT_PARAMS)) return &params;
    if (!strcmp(id, CLAP_EXT_STATE)) return &state;
+   if (!strcmp(id, CLAP_EXT_STATE_CONTEXT)) return &state_context;
    if (!strcmp(id, CLAP_EXT_REMOTE_CONTROLS) || !strcmp(id, CLAP_EXT_REMOTE_CONTROLS_COMPAT)) return &remote;
    if (!strcmp(id, CLAP_EXT_LATENCY)) return &latency;
    if (!strcmp(id, CLAP_EXT_NOTE_PORTS)) return &notes;
@@ -1214,15 +1240,21 @@ static const clap_host_undo_t *host_undo(const Plugin *s) {
    const clap_host_undo_t *u = s->host->get_extension ? s->host->get_extension(s->host, CLAP_EXT_UNDO) : NULL;
    return u && u->begin_change && u->cancel_change && u->change_made ? u : NULL;
 }
+static void mark_dirty(const Plugin *s) {
+   const clap_host_state_t *hs = s->host->get_extension ? s->host->get_extension(s->host, CLAP_EXT_STATE) : NULL;
+   if (hs && hs->mark_dirty) hs->mark_dirty(s->host);
+}
 void mt_ui_pattern_changed(const clap_plugin_t *p, const char *what) {
    Plugin *s = p->plugin_data;
    const clap_host_undo_t *u = host_undo(s);
    if (u && s->undo_long) snprintf(s->undo_name, sizeof s->undo_name, "%s", what);   /* named when it ends */
    else if (u) u->change_made(s->host, what, NULL, 0, false);
-   else {
-      const clap_host_state_t *hs = s->host->get_extension ? s->host->get_extension(s->host, CLAP_EXT_STATE) : NULL;
-      if (hs && hs->mark_dirty) hs->mark_dirty(s->host);
-   }
+   else mark_dirty(s);
+}
+void mt_ui_resized(const clap_plugin_t *p) {
+   const Plugin *s = p->plugin_data;
+   host_undo(s);   /* a host asked for its undo makes no undo step of mark_dirty */
+   mark_dirty(s);
 }
 /* A drag or a scroll: its edits are one undo step. */
 void mt_ui_change_begin(const clap_plugin_t *p) {
@@ -1279,6 +1311,9 @@ static bool gui_preferred(const clap_plugin_t *p, const char **api, bool *floati
 static bool gui_create(const clap_plugin_t *p, const char *api, bool floating) {
    Plugin *s = p->plugin_data;
    if (s->gui || !gui_supported(p, api, floating)) return false;
+   const uint32_t dflt = mt_gui_default_width();   /* read each time: another process may have changed it */
+   if (!s->gui_w) { s->gui_w = dflt; s->gui_h = 0; gui_fit(&s->gui_w, &s->gui_h); }
+   s->gui_opened = true;
    s->gui = mt_gui_create(p, &s->ui);
    if (s->gui) mt_gui_set_size(s->gui, s->gui_w, s->gui_h);
    return s->gui != NULL;
@@ -1289,7 +1324,7 @@ static void gui_destroy(const clap_plugin_t *p) {
    s->gui = NULL;
 }
 static bool gui_set_scale(const clap_plugin_t *p, double scale) { (void)p; (void)scale; return false; }   /* Cocoa works in points */
-static bool gui_get_size(const clap_plugin_t *p, uint32_t *w, uint32_t *h) { const Plugin *s = p->plugin_data; *w = s->gui_w; *h = s->gui_h; return true; }
+static bool gui_get_size(const clap_plugin_t *p, uint32_t *w, uint32_t *h) { const Plugin *s = p->plugin_data; *w = s->gui_w; *h = s->gui_h; return s->gui_w > 0; }
 static bool gui_can_resize(const clap_plugin_t *p) { (void)p; return true; }
 static bool gui_hints(const clap_plugin_t *p, clap_gui_resize_hints_t *r) {
    (void)p;
@@ -1298,17 +1333,17 @@ static bool gui_hints(const clap_plugin_t *p, clap_gui_resize_hints_t *r) {
 }
 static bool gui_adjust(const clap_plugin_t *p, uint32_t *w, uint32_t *h) {
    (void)p;
-   const double x = clamp(fmax(*w, (double)*h * MT_GUI_W / MT_GUI_H), MT_GUI_W * 0.6, MT_GUI_W * 2.0);
-   *w = (uint32_t)lround(x);
-   *h = (uint32_t)lround(x * MT_GUI_H / MT_GUI_W);
+   gui_fit(w, h);
    return true;
 }
 static bool gui_set_size(const clap_plugin_t *p, uint32_t w, uint32_t h) {
    Plugin *s = p->plugin_data;
    if (!s->gui) return false;
+   const bool changed = w != s->gui_w || h != s->gui_h;
    s->gui_w = w;
    s->gui_h = h;
    mt_gui_set_size(s->gui, w, h);
+   if (changed) mt_gui_resized(s->gui);
    return true;
 }
 static bool gui_set_parent(const clap_plugin_t *p, const clap_window_t *w) {
@@ -1343,8 +1378,6 @@ static const clap_plugin_t *factory_create(const clap_plugin_factory_t *f, const
    s->machine = m;
    s->tempo = 120.0;
    s->rate = NATIVE;
-   s->gui_w = MT_GUI_W;
-   s->gui_h = MT_GUI_H;
    for (int i = 0; i < NPARAM; ++i) atomic_init(&s->value[i], to_bits(def_of(m, i)));
    atomic_init(&s->text_dirty, false);
    atomic_init(&s->pattern_loaded, false);

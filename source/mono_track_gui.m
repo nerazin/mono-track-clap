@@ -30,9 +30,9 @@
 #endif
 
 /* Plug-ins share one host process, and Objective-C classes one namespace: the version keeps builds apart. */
-#define MTEditorView MonoTrackEditorView_0_8_3
+#define MTEditorView MonoTrackEditorView_0_8_4
 
-enum { C_TITLE, C_KNOB, C_TAB, C_SLIDER, C_SWITCH, C_KEYS, C_PAD, C_CLEAR, C_COPY, C_PASTE, C_LEN, C_SPEED, C_PAGE, C_SETUP, C_CLOSE, C_MAX = 160 };
+enum { C_TITLE, C_KNOB, C_TAB, C_SLIDER, C_SWITCH, C_KEYS, C_PAD, C_CLEAR, C_COPY, C_PASTE, C_LEN, C_SPEED, C_PAGE, C_SETUP, C_CLOSE, C_SIZE, C_MAX = 160 };
 /* Controls of the setup windows have these sections: KIT ASSIGN's KEY VEL and KEY TRK tabs. */
 enum { S_VEL = 5, S_KEY = 6 };
 typedef struct { int kind, id, section; NSRect r; const char *label; } Ctl;
@@ -47,6 +47,7 @@ static const double kNoteFade = 0.7;      /* seconds a MIDI note's line takes to
 static const double kScrollPause = 0.25;  /* a wheel idle this long has finished its scroll */
 static const double kScrollSpan = 1000;   /* points of scroll that sweep a whole range (400 before 0.5.1) */
 static const double kPressFlash = 0.15;   /* seconds CPY or PST stays lit after a click */
+static const double kResizePause = 0.5;   /* seconds after which a resize has settled */
 
 static NSColor *C(unsigned rgb, double a) {
    return [NSColor colorWithSRGBRed:(rgb >> 16 & 255) / 255.0 green:(rgb >> 8 & 255) / 255.0 blue:(rgb & 255) / 255.0 alpha:a];
@@ -55,20 +56,46 @@ enum : unsigned { BG = 0x141518, PANEL = 0x1d1f24, LINE = 0x31343c, TEXT = 0xd5d
                   LOCK = 0xffb020, MOD = 0xb18cff, TRIG = 0xff453a, TRIGLESS = 0x32d74b, NOTE = 0x4cc9ff, DARK = 0x101114,
                   FAST = 0xff5fa2, PLUME = 0x8fd3ff };   /* an LFO too quick for its graph's dot to follow; the dot's plume */
 
+/* A file of the user's Library. */
+static FILE *libraryFile(const char *name, const char *mode) {
+   const char *home = getenv("HOME");   /* not NSHomeDirectory(), so gui_test can point it elsewhere */
+   char path[1024];
+   if (!home) return NULL;
+   snprintf(path, sizeof path, "%s/Library/%s", home, name);
+   return fopen(path, mode);
+}
 /* Problems the editor got past, appended to ~/Library/Logs/Mono Track.log (first 200 per process). */
 static void logLine(NSString *what) {
    static int lines;
-   const char *home = getenv("HOME");   /* not NSHomeDirectory(), so gui_test can point it elsewhere */
-   if (lines++ >= 200 || !home) return;
-   char path[1024];
-   snprintf(path, sizeof path, "%s/Library/Logs/Mono Track.log", home);
-   FILE *f = fopen(path, "a");
+   if (lines++ >= 200) return;
+   FILE *f = libraryFile("Logs/Mono Track.log", "a");
    if (!f) return;
    char ts[32];
    const time_t t = time(NULL);
    strftime(ts, sizeof ts, "%Y-%m-%d %H:%M:%S", localtime(&t));
    fprintf(f, "%s pid %d: %s\n", ts, getpid(), what.UTF8String);
    fclose(f);
+}
+
+/* The size new instances open at, every machine's: the one setting outside the projects. */
+#define SETTINGS "Application Support/Mono Track.settings"
+static uint32_t defaultWidth = MT_GUI_W;   /* as last read or set in this process, for the editors to show */
+uint32_t mt_gui_default_width(void) {
+   int w = 0;
+   FILE *f = libraryFile(SETTINGS, "r");
+   if (f) {
+      if (fscanf(f, "editor_width %5d", &w) != 1) w = 0;
+      fclose(f);
+   }
+   return defaultWidth = w > 0 ? (uint32_t)w : MT_GUI_W;
+}
+static BOOL saveDefaultWidth(uint32_t w) {
+   FILE *f = libraryFile(SETTINGS, "w");
+   if (!f) return NO;
+   const BOOL wrote = fprintf(f, "editor_width %u\n", w) > 0;
+   if (fclose(f) || !wrote) return NO;
+   defaultWidth = w;
+   return YES;
 }
 
 static void drawText(const char *s, NSRect r, CGFloat size, NSFontWeight w, NSColor *color, NSTextAlignment align) {
@@ -119,6 +146,7 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
 - (void)stopRefresh;
 - (void)closeEditing;
 - (void)takeKeys;
+- (void)resized;
 @end
 
 @implementation MTEditorView {
@@ -154,6 +182,7 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
    NSTimeInterval _movedAt[3], _lfoTick;
    double _scrollValue;
    NSTimeInterval _scrollUntil;
+   NSTimeInterval _resizedAt;   /* when the host last resized it, until the size has settled; else 0 */
    id _refresh;
 }
 
@@ -186,6 +215,8 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
    }
    static const char *const tabs[3] = {"LFO1", "LFO2", "LFO3"};
    for (int l = 0; l < 3; ++l) [self add:C_TAB id:l section:4 rect:NSMakeRect(976 + 76 * l, 16, 76, 28) label:tabs[l]];
+
+   [self add:C_SIZE id:0 section:0 rect:NSMakeRect(176, 0, 150, 14) label:NULL];   /* beside the version */
 
    const CGFloat rx = 1224, rw = 128;
    CGFloat ry = 12;
@@ -339,6 +370,7 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
       case C_COPY: case C_PASTE: [self drawPadButton:c index:i]; break;
       case C_LEN: case C_SPEED: case C_PAGE: [self drawScale:c]; break;
       case C_SETUP: [self drawSetupButton:c]; break;
+      case C_SIZE: [self drawSize:c]; break;
       case C_CLOSE:
          drawText("\u00d7", NSMakeRect(c->r.origin.x, c->r.origin.y + 1, c->r.size.width, 18), 15, NSFontWeightRegular, C(MUTED, 1), NSTextAlignmentCenter);
          break;
@@ -697,6 +729,15 @@ static void dot(CGContextRef g, CGPoint o, double r, double f, double size, NSCo
    strokeRound(c->r, 5, 1, C(MUTED, 0.8));
    drawText(t, NSMakeRect(c->r.origin.x, c->r.origin.y + 5, c->r.size.width, 15), 11, NSFontWeightSemibold, C(TEXT, 0.85), NSTextAlignmentCenter);
 }
+/* Barely there while the window has the default size; else it offers this size as the default. */
+static int percent(double width) { return (int)lround(100 * width / MT_GUI_W); }
+- (BOOL)sizeIsDefault { return percent(self.frame.size.width) == percent(defaultWidth); }   /* to the percent: a host may round the size */
+- (void)drawSize:(const Ctl *)c {
+   char t[32] = "DEFAULT SIZE";
+   const BOOL same = [self sizeIsDefault];
+   if (!same) snprintf(t, sizeof t, "SET %d%% AS DEFAULT SIZE", percent(self.frame.size.width));
+   drawText(t, NSOffsetRect(c->r, 0, 2), 9, NSFontWeightRegular, C(same ? MUTED : TEXT, same ? 0.3 : 0.85), NSTextAlignmentLeft);
+}
 /* The pads show another page: what was held on this one is let go. */
 - (void)showPage:(int)k {
    if (k == _page) return;
@@ -905,6 +946,7 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
       const BOOL shown = [self padButtonsShown:c->id];
       return mix(mix(h, shown), shown ? [self padButtonEnabled:c] * 2 + [self flashing:(int)(c - _c)] : 0);
    }
+   case C_SIZE: return mix(mix(h, [self sizeIsDefault]), percent(self.frame.size.width));
    case C_LEN: return mix(h, [self length]);
    case C_SPEED: return mix(h, atomic_load_explicit(&_ui->speed, memory_order_relaxed));
    case C_PAGE: {
@@ -924,6 +966,7 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
 - (void)tick:(id)sender {
    (void)sender;
    if (_scrollId >= 0 && CACurrentMediaTime() > _scrollUntil) [self endScroll];
+   if (_resizedAt && CACurrentMediaTime() > _resizedAt + kResizePause) [self sizeSettled];
    [self checkHolds];
    if (_page > [self lastPage]) [self showPage:0];   /* the pattern got shorter: back to the first page, as the unit goes */
    for (int t = 0; t < UI_STEPS; ++t) {
@@ -987,7 +1030,14 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
    if (_dragId >= 0) [self endDrag];
    _dragCtl = -1;
    [self endScroll];
+   [self sizeSettled];
    self.needsDisplay = YES;
+}
+/* A resize is many sizes: the host is told once it has paused, or when the editor closes. */
+- (void)resized { _resizedAt = CACurrentMediaTime(); }
+- (void)sizeSettled {
+   if (_resizedAt) mt_ui_resized(_p);
+   _resizedAt = 0;
 }
 - (void)endDrag {
    if (_dragGesture) mt_ui_end(_p, _dragId);
@@ -1100,6 +1150,12 @@ static double lfoShape(int wave, double x, const int8_t *rnd) {
       mt_ui_change_begin(_p);
       break;
    case C_KEYS: [self setKeys:!_keys]; break;
+   case C_SIZE:
+      if (![self sizeIsDefault] && !saveDefaultWidth((uint32_t)lround(self.frame.size.width))) {
+         logLine(@"could not save the default size in ~/Library/" SETTINGS);
+         NSBeep();
+      }
+      break;
    case C_SWITCH: mt_ui_set(_p, c->id, [self base:c->id] >= 0.5 ? 0 : 1); break;
    case C_COPY: case C_PASTE:
       _edited |= 1u << c->id;        /* so releasing the key does not count as a tap */
@@ -1283,6 +1339,7 @@ void mt_gui_set_size(void *gui, uint32_t w, uint32_t h) {
    [v setBoundsSize:NSMakeSize(MT_GUI_W, MT_GUI_H)];   /* everything is laid out in these units */
    v.needsDisplay = YES;
 }
+void mt_gui_resized(void *gui) { [(__bridge MTEditorView *)gui resized]; }
 void mt_gui_show(void *gui) {
    MTEditorView *v = (__bridge MTEditorView *)gui;
    v.hidden = NO;

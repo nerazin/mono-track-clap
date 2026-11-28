@@ -14,7 +14,8 @@
  *    one's DPTH changes that movement
  *  - LFO list knobs show their entries, and DEST names follow PAGE
  *  - state round trip, rejected bad states, parameter text round trip, states of
- *    0.1.0, 0.2.0 and 0.4 (16 steps)
+ *    0.1.0, 0.2.0 and 0.4 (16 steps), 0.5 and 0.6 to 0.8.3 (no editor size)
+ *  - the editor's size in the state: kept, fitted, and left out of presets
  *  - POLY: one note equals mono, a chord is the sum of its notes, a seventh steals
  *  - the MIDI TRIG switches
  *  - trigs play no note: they restart the filter envelope and LFOs and end locks
@@ -33,7 +34,8 @@
 #define CHECK(c, ...) do { if (!(c)) { printf("FAIL line %d: ", __LINE__); printf(__VA_ARGS__); puts(""); exit(1); } } while (0)
 #define NPARAM 78
 #define PAT (8 + 8 * NPARAM)
-#define STATE_SIZE (PAT + 10 + 64 * 56)
+#define WIDTH (PAT + 10 + 64 * 56)   /* the editor's, two bytes */
+#define STATE_SIZE (WIDTH + 2)
 #define N 88200
 enum { SYN = 0, AMP = 8, FILT = 16, EFX = 24, LFO = 32, LEVEL = 56, LPKEY, HPKEY, BEND, MTUNE, POLY, TRIG_SYN, TRIG_FILT, TRIG_LFO, LOCK_END, ASSIGN };   /* ASSIGN: VEL 1, VEL 2, KEY 1, KEY 2, each PAGE DEST ADD */
 static const char *const ids[15] = {"sin", "nois", "saw", "puls", "ens", "fmstat", "fmpar", "fmdyn",
@@ -453,9 +455,34 @@ int main(int argc, char **argv) {
             pq->get_value(q, HPKEY, &x); CHECK(x == 0, "0.5: HP KEY kept");
             Buffer e = {{0}, 0, 0};
             clap_ostream_t oe = {&e, buf_write};
-            CHECK(sq->save(q, &oe) && e.data[7] == 5 && !memcmp(e.data + PAT, a.data + PAT, 10 + 64 * 56), "0.5 pattern kept");
+            CHECK(sq->save(q, &oe) && e.data[7] == 6 && !memcmp(e.data + PAT, a.data + PAT, 10 + 64 * 56), "0.5 pattern kept");
             v4.pos = 0; v4.size--;
             CHECK(!sq->load(q, &i4), "a short 0.5 state");
+         }
+         /* the editor's width: none until it is opened; kept; fitted to what the editor can have; not in a preset,
+            and none in a state saved by 0.6 to 0.8.3 */
+         {
+            const clap_plugin_state_context_t *cq = q->get_extension(q, CLAP_EXT_STATE_CONTEXT);
+            const struct { int version, in; uint32_t from, to; int out; } w[] = {
+               {6, 0, 0, 0, 0}, {6, 1710, 0, 0, 1710}, {6, 5000, 0, 0, 2736}, {6, 10, 0, 0, 821}, {5, 0, 0, 0, 0},
+               {6, 1710, CLAP_STATE_CONTEXT_FOR_PROJECT, CLAP_STATE_CONTEXT_FOR_DUPLICATE, 1710},
+               {6, 1500, CLAP_STATE_CONTEXT_FOR_PRESET, 0, 1710},                                /* a preset leaves it alone */
+               {6, 1500, CLAP_STATE_CONTEXT_FOR_DUPLICATE, CLAP_STATE_CONTEXT_FOR_PRESET, 0},   /* and is saved without one */
+            };
+            CHECK(cq, "state-context");
+            for (int i = 0; i < (int)(sizeof w / sizeof *w); ++i) {
+               Buffer in = c, back = {{0}, 0, 0};
+               clap_istream_t ii = {&in, buf_read};
+               clap_ostream_t ob = {&back, buf_write};
+               in.pos = 0;
+               in.data[7] = (uint8_t)w[i].version;
+               in.size = w[i].version < 6 ? WIDTH : STATE_SIZE;
+               in.data[WIDTH] = (uint8_t)w[i].in; in.data[WIDTH + 1] = (uint8_t)(w[i].in >> 8);
+               CHECK(w[i].from ? cq->load(q, &ii, w[i].from) : sq->load(q, &ii), "width %d load", i);
+               CHECK((w[i].to ? cq->save(q, &ob, w[i].to) : sq->save(q, &ob)) && back.size == STATE_SIZE, "width %d save", i);
+               const int got = back.data[WIDTH] | back.data[WIDTH + 1] << 8;
+               CHECK(got == w[i].out, "width %d: %d", i, got);
+            }
          }
       }
       q->destroy(q);
